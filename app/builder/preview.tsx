@@ -651,10 +651,11 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
 
   if(template==="modern") return (
     <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}>
-      <div style={{background:c.l,padding:"clamp(16px,3vw,26px) clamp(18px,4vw,38px) clamp(14px,3vw,22px)",borderBottom:`2px solid ${c.b}`}}>
-        <div style={{fontSize:"clamp(16px,4vw,24px)",fontWeight:800,color:"#111827",letterSpacing:-0.3}}>{name}</div>
+      <div style={{background: "#1e293b",
+  padding: "clamp(16px,3vw,26px) clamp(18px,4vw,38px) clamp(14px,3vw,22px)",borderBottom:`2px solid ${c.b}`}}>
+        <div style={{fontSize:"clamp(16px,4vw,24px)",fontWeight:800,color:"#fff",letterSpacing:-0.3}}>{name}</div>
         {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:3}}>{data.contact.jobTitle}</div>}
-        <ContactRow tc="muted"/>
+        <ContactRow tc="white"/>
       </div>
       <div style={{padding:padN}}>
         <SummaryBlock/><ExpBlock/><EduBlock/><SkillsBlock/><ProjectsBlock/><CertsBlock/><CustomBlocks/>

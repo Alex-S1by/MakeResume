@@ -986,7 +986,7 @@ export default function ResumeBuilder() {
               <div className={`w-2 h-2 rounded-full transition-colors ${score>=80?"bg-emerald-400":score>=50?"bg-sky-400":"bg-amber-400"}`}/>
               <span className="text-xs font-bold text-gray-600">Score: <span className={score>=80?"text-emerald-600":score>=50?"text-sky-600":"text-amber-600"}>{score}/100</span></span>
             </div>
-            <div className="hidden sm:flex items-center gap-2">
+            <div className=" flex items-center sm:gap-2 gap-1 ">
               <button onClick={deleteDraft} className="text-xs font-semibold text-gray-400 hover:text-gray-700 px-3 py-1.5 rounded-xl hover:bg-gray-100 transition-colors flex items-center gap-1.5">
                 <i className="fa-solid fa-trash text-[11px]"/>Delete Draft
               </button>

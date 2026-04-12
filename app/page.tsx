@@ -143,6 +143,8 @@ export default function Home() {
          setLoadingStep(3);
       if (data)
         localStorage.setItem("resume_draft", JSON.stringify(data.improved));
+      localStorage.setItem("resume_color", "blue");
+      localStorage.setItem("template", "classic");
 
       setLoading(false);
 
