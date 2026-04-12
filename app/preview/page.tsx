@@ -8,7 +8,7 @@ const defaultData: ResumeData = {
   summary: "",
   experience: [],
   education:  [],
-  skills:     [],
+  skillGroups:     [],
   projects:   [],
   certs:      [],
   custom:     [],
