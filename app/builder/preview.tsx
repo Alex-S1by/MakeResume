@@ -389,8 +389,8 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
 
   const titleStyle:React.CSSProperties  ={fontWeight:700,fontSize:10.5,color:"#111827"};
   const subtitleStyle:React.CSSProperties={fontSize:9.5,fontWeight:600,color:"#374151",marginTop:1};
-  const metaStyle:React.CSSProperties   ={fontSize:9,color:"#9ca3af"};
-  const bodyStyle:React.CSSProperties   ={fontSize:9.5,color:"#6b7280",lineHeight:1.65,marginTop:3,whiteSpace:"pre-line" as const};
+  const metaStyle:React.CSSProperties   ={fontSize:9,color:"#000000"};
+  const bodyStyle:React.CSSProperties   ={fontSize:9.5,color:"#000000",lineHeight:1.65,marginTop:3,whiteSpace:"pre-line" as const};
 
   const EBlock=({children}:{children:React.ReactNode})=><div style={{marginBottom:9}}>{children}</div>;
   const ERow=({l,r}:{l:React.ReactNode;r:string})=>(
@@ -401,7 +401,7 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
   );
 
   const ContactRow=({tc="dark"}:{tc?:"dark"|"muted"|"white"|"centered"})=>{
-    const textColor=tc==="white"?"rgba(255,255,255,0.8)":tc==="muted"?"#9ca3af":"#6b7280";
+    const textColor=tc==="white"?"rgba(255,255,255,0.8)":tc==="muted"?"#1d2626":"#1d2626";
     const ic={marginRight:3,fontSize:7.5} as React.CSSProperties;
     return(
       <div style={{display:"flex",flexWrap:"wrap",gap:"0 14px",marginTop:7,justifyContent:tc==="centered"?"center":"flex-start"}}>
@@ -429,7 +429,7 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
             return(
               <div key={g.id} style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"baseline",fontSize:9.5,lineHeight:1.7}}>
                 <span style={{fontWeight:700,color:isWhite?"rgba(255,255,255,0.9)":c.p,flexShrink:0,whiteSpace:"nowrap"}}>{g.heading}:</span>
-                <span style={{color:isWhite?"rgba(255,255,255,0.7)":"#6b7280"}}>{chips.join(", ")}</span>
+                <span style={{color:isWhite?"#1d2626":"#1d2626"}}>{chips.join(", ")}</span> 
               </div>
             );
           })}
@@ -454,7 +454,7 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
                 <div key={g.id+sk}>
                   <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
                     <span style={{fontSize:"clamp(8px,1.5vw,9.5px)",fontWeight:600,color:"#374151"}}>{sk}</span>
-                    <span style={{fontSize:"clamp(7px,1.5vw,8px)",color:"#9ca3af"}}>{pct}%</span>
+                    <span style={{fontSize:"clamp(7px,1.5vw,8px)",color:"#1d2626"}}>{pct}%</span>
                   </div>
                   <div style={{height:5,background:c.b,borderRadius:3,overflow:"hidden"}}>
                     <div style={{height:"100%",width:`${pct}%`,background:c.p,borderRadius:3}}/>
@@ -481,7 +481,7 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
             return(
               <div key={g.id} style={{textAlign:"center"}}>
                 <span style={{fontSize:8,fontWeight:800,color:c.p,textTransform:"uppercase" as const,letterSpacing:"0.1em",marginRight:6}}>{g.heading}:</span>
-                <span style={{fontSize:9.5,color:"#6b7280"}}>{chips.join(", ")}</span>
+                <span style={{fontSize:9.5,color:"#1d2626"}}>{chips.join(", ")}</span>
               </div>
             );
           })}
@@ -538,9 +538,9 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
     <div style={{marginBottom:14}}>
       <SecTitle t="Education" variant={variant}/>
       {data.education.map(edu=>(
-        <EBlock key={edu.id}>
+        <EBlock key={edu.id} >
           <ERow l={<span style={{...titleStyle,color:variant==="white"?"#fff":titleStyle.color}}>{edu.degree}{edu.field?` in ${edu.field}`:""}</span>} r={ds(edu)}/>
-          <div style={{...subtitleStyle,color:variant==="white"?"rgba(255,255,255,0.7)":subtitleStyle.color}}>{edu.institution}</div>
+          <div style={{...subtitleStyle,marginBottom:4,marginTop:4, color:variant==="white"?"rgba(255,255,255,0.7)":subtitleStyle.color}}>{edu.institution}</div>
           {edu.grade&&<div style={{...metaStyle,color:variant==="white"?"rgba(255,255,255,0.5)":metaStyle.color}}>Grade: {edu.grade}</div>}
         </EBlock>
       ))}
@@ -709,9 +709,9 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
       <div style={{textAlign:"center",borderBottom:`1.5px solid ${c.b}`,paddingBottom:14,marginBottom:4}}>
         <div style={{fontSize:"clamp(15px,4vw,22px)",fontWeight:900,color:"#111827",letterSpacing:2,textTransform:"uppercase"}}>{name}</div>
         {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,marginTop:4,fontWeight:700}}>{data.contact.jobTitle}</div>}
-        <ContactRow tc="muted"/>
+        <ContactRow tc="centered"/>
       </div>
-      <SummaryBlock variant="dark-serif" label="Research Profile"/>
+      <SummaryBlock variant="dark-serif" label="Professional Summary"/>
       <EduBlock variant="dark-serif"/><ExpBlock variant="dark-serif"/>
       <SkillsBlock variant="dark-serif"/>
       <ProjectsBlock variant="dark-serif"/><CertsBlock variant="dark-serif"/><CustomBlocks variant="dark-serif"/>

@@ -21,8 +21,8 @@ interface EduEntry {
 // ─── NEW: Grouped Skills ──────────────────────────────────────────────────────
 interface SkillGroup {
   id: number;
-  heading: string;   // e.g. "Languages", "Frontend", "Tools"
-  skills: string;    // comma-separated, e.g. "JavaScript, TypeScript, Python"
+  heading: string;  
+  skills: string;
 }
 
 interface ProjectEntry { id: number; title: string; description: string; link: string; }
@@ -45,7 +45,7 @@ interface ColorConfig {
 interface ResumeData {
   contact: ContactData; summary: string;
   experience: ExpEntry[]; education: EduEntry[];
-  skillGroups: SkillGroup[];           // ← replaces flat skills[]
+  skillGroups: SkillGroup[];         
   projects: ProjectEntry[]; certs: CertEntry[]; custom: CustomSection[];
 }
 
@@ -70,7 +70,7 @@ const DEFAULT_SKILL_GROUPS: SkillGroup[] = [
   { id: 4, heading: "Database",   skills: "MongoDB, PostgreSQL, SQL" },
   { id: 5, heading: "Tools",      skills: "Git, Docker, VS Code" },
   { id: 6, heading: "Soft Skills",skills: "Communication, Leadership, Agile" },
-];
+];  
 
 // Popular quick-add presets per category
 const SKILL_PRESETS: Record<string, string[]> = {
@@ -134,7 +134,7 @@ const defaultData: ResumeData = {
   contact: { firstName:"", lastName:"", email:"", phone:"", jobTitle:"", city:"", country:"India", linkedin:"", website:"" },
   summary: "",
   experience: [], education: [],
-  skillGroups: DEFAULT_SKILL_GROUPS,
+  skillGroups: [],
   projects: [], certs: [], custom: [],
 };
 
