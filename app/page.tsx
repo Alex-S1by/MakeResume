@@ -63,34 +63,46 @@ export default function Home() {
     }
   };
 
-  const loadPdfWorker = async () => {
+ const loadPdfWorker = async () => {
+    // Force the browser-specific minified build
     const pdfjsLib = await import("pdfjs-dist");
 
-    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-      "pdfjs-dist/build/pdf.worker.min.mjs",
-      import.meta.url,
-    ).toString();
+    // Use the exact matching version worker from a CDN
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`;
 
     return pdfjsLib;
   };
 
   const extractTextFromPDF = async (file: File) => {
-    const pdfjsLib = await loadPdfWorker();
+    try {
+      const pdfjsLib = await loadPdfWorker();
+      const arrayBuffer = await file.arrayBuffer();
+      
+      const loadingTask = pdfjsLib.getDocument({ 
+        data: arrayBuffer,
+        useSystemFonts: true 
+      });
 
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      const pdf = await loadingTask.promise;
+      let text = "";
 
-    let text = "";
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const content = await page.getTextContent();
 
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const content = await page.getTextContent();
+        // Safely extract strings
+        const strings = content.items
+          .map((item: any) => item.str || "")
+          .filter((str: string) => str.trim() !== "");
+          
+        text += strings.join(" ") + "\n";
+      }
 
-      const strings = content.items.map((item: any) => item.str);
-      text += strings.join(" ") + "\n";
+      return text;
+    } catch (error) {
+      console.error("PDF Extraction error:", error);
+      throw new Error("Failed to read PDF. The file might be corrupted.");
     }
-
-    return text;
   };
 
   const extractTextFromDocx = async (file: File) => {
