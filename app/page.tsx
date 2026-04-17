@@ -2,11 +2,14 @@
 
 import Image from "next/image";
 import { useState, useRef, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import toast from "react-hot-toast";
 
 import mammoth from "mammoth";
 
+
 export default function Home() {
+  const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
   const [fileName, setFileName] = useState<string>("");
   const [loading, setLoading] = useState(false);
@@ -160,7 +163,9 @@ export default function Home() {
 
       setLoading(false);
 
-      window.location.href = "/preview";
+      router.push('/preview');
+
+      
 
       // optional: redirect to builder with data
       // router.push("/builder");

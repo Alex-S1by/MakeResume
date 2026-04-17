@@ -347,24 +347,67 @@ function dlStyle(bg:string,disabled?:boolean):React.CSSProperties {
   return {display:"flex",alignItems:"center",gap:8,background:disabled?"#e5e7eb":bg,color:disabled?"#9ca3af":"#fff",border:"none",borderRadius:10,padding:"9px 20px",fontSize:13,fontWeight:700,cursor:disabled?"not-allowed":"pointer",fontFamily:"'Plus Jakarta Sans',sans-serif",boxShadow:disabled?"none":`0 2px 12px ${bg}44`,textDecoration:"none",whiteSpace:"nowrap" as const};
 }
 
+
 function DownloadBtn({data,template,color}:{data:ResumeData;template:TemplateName;color:ColorName}) {
   const [isDownloading,setIsDownloading]=useState(false);
   const c=HC[color];
   const fileName=`${data.contact.firstName||"Resume"}_${data.contact.lastName||"CV"}.pdf`;
+
   const handleDownload=async()=>{
-    const element=document.querySelector(".a4");if(!element)return;
-    try{
-      setIsDownloading(true);const toastId=toast.loading("Generating PDF...");
-      const html=`<html><head><meta charset="utf-8"/><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"/><style>body{margin:0;}.a4{width:210mm;min-height:297mm;}</style></head><body>${element.outerHTML}</body></html>`;
-      const res=await fetch("/api/pdf",{method:"POST",body:JSON.stringify({html})});
-      const blob=await res.blob();const url=window.URL.createObjectURL(blob);
-      const a=document.createElement("a");a.href=url;a.download=fileName;a.click();
-      toast.success("Download complete!",{id:toastId});window.URL.revokeObjectURL(url);
-    }catch(err){console.error(err);toast.error("Failed to download PDF");}
-    finally{setIsDownloading(false);}
+    const element=document.querySelector(".a4");
+    if(!element) return;
+    
+    try {
+      setIsDownloading(true);
+      const toastId=toast.loading("Generating PDF...");
+      
+      // Enforce absolute width so the server-side browser doesn't try to render a mobile layout
+      const html=`<html><head><meta charset="utf-8"/><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"/><style>body{margin:0; background:white;}.a4{width:794px;min-height:1123px;}</style></head><body>${element.outerHTML}</body></html>`;
+      
+      const res=await fetch("/api/pdf",{
+        method:"POST",
+        headers: { "Content-Type": "application/json" },
+        body:JSON.stringify({html})
+      });
+
+      // CRITICAL FIX 1: Prevent downloading HTML error pages as PDFs
+      if (!res.ok) {
+        throw new Error("Server failed to generate PDF");
+      }
+
+      const rawBlob = await res.blob();
+      
+      // CRITICAL FIX 2: Explicitly declare the MIME type for mobile OS handling
+      const pdfBlob = new Blob([rawBlob], { type: 'application/pdf' });
+      const url = window.URL.createObjectURL(pdfBlob);
+      
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      
+      // CRITICAL FIX 3: Append element to DOM before clicking (Required by iOS/Mobile Safari)
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      
+      toast.success("Download complete!",{id:toastId});
+
+      // CRITICAL FIX 4: Add a slight delay before revoking the URL for older mobile devices
+      setTimeout(() => {
+        window.URL.revokeObjectURL(url);
+      }, 1000);
+
+    } catch(err) {
+      console.error(err);
+      toast.error("Failed to download PDF");
+    } finally {
+      setIsDownloading(false);
+    }
   };
+
+  // Fixed the dlStyle call to pass the disabled state correctly
   return(
-    <button onClick={handleDownload} style={dlStyle(c.p)} disabled={isDownloading}>
+    <button onClick={handleDownload} style={dlStyle(c.p, isDownloading)} disabled={isDownloading}>
       {isDownloading?<><i className="fa-solid fa-spinner fa-spin" style={{fontSize:11}}/> Downloading...</>:<><i className="fa-solid fa-download" style={{fontSize:11}}/> Download PDF</>}
     </button>
   );
