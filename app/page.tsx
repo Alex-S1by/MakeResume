@@ -75,14 +75,16 @@ export default function Home() {
       /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
  
     if (isMobile) {
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-} else {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-    "pdfjs-dist/build/pdf.worker.min.js",
-    import.meta.url
-  ).toString();
-}
+      // On mobile, point at the CDN-hosted worker so no local blob/module gymnastics
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    } else {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+        "pdfjs-dist/build/pdf.worker.min.mjs",
+        import.meta.url
+      ).toString();
+    }
+ 
     const arrayBuffer = await file.arrayBuffer();
  
     // useWorkerFetch + isEvalSupported=false avoids eval() banned on some mobile browsers
