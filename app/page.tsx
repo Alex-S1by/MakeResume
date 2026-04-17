@@ -63,36 +63,69 @@ export default function Home() {
     }
   };
 
-  const loadPdfWorker = async () => {
+  // ─── Mobile-safe PDF text extraction ──────────────────────────────────────
+  const extractTextFromPDF = async (file: File): Promise<string> => {
+    // Dynamically import so the worker URL resolves at runtime
     const pdfjsLib = await import("pdfjs-dist");
-
-    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-      "pdfjs-dist/build/pdf.worker.min.mjs",
-      import.meta.url,
-    ).toString();
-
-    return pdfjsLib;
-  };
-
-  const extractTextFromPDF = async (file: File) => {
-    const pdfjsLib = await loadPdfWorker();
-
+ 
+    // Use the legacy build on mobile to avoid ES2020+ issues
+    // Set workerSrc to the CDN fallback — avoids new URL() blob issues on iOS/Android WebView
+    const isMobile =
+      typeof navigator !== "undefined" &&
+      /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+ 
+    if (isMobile) {
+      // On mobile, point at the CDN-hosted worker so no local blob/module gymnastics
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+    } else {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+        "pdfjs-dist/build/pdf.worker.min.mjs",
+        import.meta.url
+      ).toString();
+    }
+ 
     const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-
+ 
+    // useWorkerFetch + isEvalSupported=false avoids eval() banned on some mobile browsers
+    // useSystemFonts=true + disableFontFace=true skips font colour ops that trigger toHex
+    const loadingTask = pdfjsLib.getDocument({
+      data: arrayBuffer,
+      useWorkerFetch: false,
+      isEvalSupported: false,
+      useSystemFonts: true,
+      disableFontFace: true,
+      // Disable CMap fetching (colour-map tables) — root cause of toHex on mobile
+      cMapUrl: undefined,
+      cMapPacked: false,
+    });
+ 
+    const pdf = await loadingTask.promise;
     let text = "";
-
+ 
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
-      const content = await page.getTextContent();
-
-      const strings = content.items.map((item: any) => item.str);
-      text += strings.join(" ") + "\n";
+ 
+      // getTextContent with normalizeWhitespace keeps things clean
+      const content = await page.getTextContent({
+        // @ts-ignore — older type defs may not include this flag
+        normalizeWhitespace: true,
+        disableCombineTextItems: false,
+      });
+ 
+      const pageText = content.items
+        .map((item: any) => ("str" in item ? item.str : ""))
+        .join(" ");
+ 
+      text += pageText + "\n";
+ 
+      // Release page resources to avoid memory pressure on mobile
+      page.cleanup();
     }
-
-    return text;
+ 
+    return text.trim();
   };
-
+ 
   const extractTextFromDocx = async (file: File) => {
     const arrayBuffer = await file.arrayBuffer();
     const result = await mammoth.extractRawText({ arrayBuffer });
