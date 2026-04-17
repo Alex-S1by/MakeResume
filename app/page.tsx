@@ -56,7 +56,7 @@ export default function Home() {
     if (isMobile) {
       // On mobile, point at the CDN-hosted worker so no local blob/module gymnastics
       pdfjsLib.GlobalWorkerOptions.workerSrc =
-        `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+        `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.6.205/pdf.worker.min.js`;
     } else {
       pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
         "pdfjs-dist/build/pdf.worker.min.mjs",
