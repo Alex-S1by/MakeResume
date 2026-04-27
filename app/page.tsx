@@ -5,6 +5,9 @@ import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import toast from "react-hot-toast";
 
+import { signIn, signOut, useSession } from "next-auth/react";
+
+
 import mammoth from "mammoth";
 
 
@@ -15,6 +18,9 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [loadingStep, setLoadingStep] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
+
+
+  const { data: session } = useSession();
 
   const steps = [
   "Uploading to AI...",
@@ -211,17 +217,41 @@ export default function Home() {
             </a>
 
             <div className="flex items-center gap-2">
-              <button className="hidden sm:inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-gray-700 rounded-lg hover:bg-gray-100 transition-colors">
-                <i className="fa-regular fa-user text-xs" />
-                Login
-              </button>
-              <button
-                onClick={makeresume}
-                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-bold bg-sky-500 hover:bg-sky-600 text-white rounded-lg transition-all shadow-sm"
-              >
-                Get Started
-                <i className="fa-solid fa-arrow-right text-xs" />
-              </button>
+            {session ? (
+  <div className="flex items-center gap-3">
+    {/* Avatar */}
+    {session.user?.image && (
+      <img
+        src={session.user.image}
+        alt="profile"
+        className="w-9 h-9 rounded-full border border-gray-200"
+       onClick={()=>router.push('/profile')}/>
+    )}
+
+    {/* Name */}
+    <span className="text-sm font-semibold text-gray-800 hidden sm:block">
+      {session.user?.name}
+    </span>
+
+    {/* Logout */}
+    <button
+      onClick={() => signOut()}
+      className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition"
+    >
+      <i className="fa-solid fa-arrow-right-from-bracket text-xs" />
+      <span className="hidden sm:inline">Logout</span>
+    </button>
+  </div>
+) : (
+  <button
+    onClick={() => signIn("google")}
+    className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-gray-800 bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md hover:bg-gray-50 transition-all"
+  >
+    <i className="fa-brands fa-google text-red-500 text-sm" />
+    <span>Continue with Google</span>
+  </button>
+)}
+           
             </div>
           </div>
         </header>

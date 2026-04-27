@@ -2,11 +2,11 @@
 
 import { useState } from "react";
 import { Document, Page, Text, View, StyleSheet, Link } from "@react-pdf/renderer";
-import dynamic from "next/dynamic";
 import toast from "react-hot-toast";
+import { useSession } from "next-auth/react";
 
 // ═══════════════════════════════════════════════════════════════
-// TYPES
+// TYPES  (unchanged)
 // ═══════════════════════════════════════════════════════════════
 export interface ContactData {
   firstName:string; lastName:string; email:string; phone:string;
@@ -14,14 +14,14 @@ export interface ContactData {
 }
 export interface ExpEntry      { id:number; company:string; position:string; startDate:string; endDate:string; current:boolean; description:string; }
 export interface EduEntry      { id:number; institution:string; degree:string; field:string; startDate:string; endDate:string; current:boolean; grade:string; }
-export interface SkillGroup    { id:number; heading:string; skills:string; }   // ← NEW grouped structure
+export interface SkillGroup    { id:number; heading:string; skills:string; }
 export interface ProjectEntry  { id:number; title:string; description:string; link:string; }
 export interface CertEntry     { id:number; name:string; issuer:string; year:string; }
 export interface CustomSection { id:number; heading:string; content:string; }
 export interface ResumeData {
   contact:ContactData; summary:string;
   experience:ExpEntry[]; education:EduEntry[];
-  skillGroups:SkillGroup[];          // ← replaces flat skills[]
+  skillGroups:SkillGroup[];
   projects:ProjectEntry[];
   certs:CertEntry[]; custom:CustomSection[];
 }
@@ -40,7 +40,7 @@ export type ColorName =
   | "slate"|"indigo"|"teal"|"orange"|"neutral";
 
 // ═══════════════════════════════════════════════════════════════
-// COLOR MAPS
+// COLOR MAPS  (unchanged)
 // ═══════════════════════════════════════════════════════════════
 export const COLOR_META:Record<ColorName,{label:string;hex:string}> = {
   blue:    {label:"Sky Blue",hex:"#0284c7"}, emerald:{label:"Emerald",hex:"#059669"},
@@ -85,7 +85,7 @@ export const TEMPLATE_META:Record<TemplateName,{label:string;desc:string;icon:st
   minimal:      {label:"Minimal",      desc:"Ultra-clean, maximum whitespace",          icon:"fa-solid fa-minus",               ats:98},
   compact:      {label:"Compact",      desc:"Dense, fits more on one page",             icon:"fa-solid fa-compress",            ats:94},
   elegant:      {label:"Elegant",      desc:"Serif font, left-rule refined look",       icon:"fa-solid fa-feather",             ats:96},
-  classic:      {label:"Classic",      desc:"CV-style Classic",                         icon:"fa-solid fa-graduation-cap",      ats:97},
+  classic:      {label:"Classic",      desc:"CV-style classic centered layout",         icon:"fa-solid fa-graduation-cap",      ats:97},
   tech:         {label:"Tech",         desc:"Developer-friendly, skill-forward",        icon:"fa-solid fa-code",                ats:92},
   colorband:    {label:"Color Band",   desc:"Bold accent header band",                  icon:"fa-solid fa-fill-drip",           ats:80,colorful:true},
   gradient:     {label:"Gradient",     desc:"Soft gradient header for visual flair",    icon:"fa-solid fa-wand-magic-sparkles", ats:78,colorful:true},
@@ -106,90 +106,321 @@ function ds(e:{startDate:string;endDate:string;current:boolean}) {
 }
 const fn = (d:ResumeData) => `${d.contact.firstName||"Your"} ${d.contact.lastName||"Name"}`;
 
-// Flatten all skill groups to a plain text list (for PDF / plain layouts)
-function flatSkills(groups:SkillGroup[]):string {
-  return groups.filter(g=>g.heading&&g.skills.trim())
-    .map(g=>`${g.heading}: ${g.skills.split(",").map(s=>s.trim()).filter(Boolean).join(", ")}`)
-    .join("  |  ");
+// ═══════════════════════════════════════════════════════════════
+// iOS DETECTION
+// ═══════════════════════════════════════════════════════════════
+function isIOS():boolean {
+  if(typeof navigator==="undefined") return false;
+  return /iPad|iPhone|iPod/.test(navigator.userAgent)||
+    (navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ResumePDF — react-pdf document
+// DOWNLOAD BUTTON — 100% client-side, mobile-safe
+// Uses html2canvas + jsPDF (dynamic import = no SSR issue)
+// Works on: desktop, Android Chrome, iOS Safari, Samsung Browser
 // ═══════════════════════════════════════════════════════════════
-export function ResumePDF({data,template="chronological",color="blue"}:{
-  data:ResumeData; template:TemplateName; color:ColorName;
+function dlBtnStyle(bg:string,disabled?:boolean):React.CSSProperties {
+  return {
+    display:"flex",alignItems:"center",gap:8,
+    background:disabled?"#e5e7eb":bg,
+    color:disabled?"#9ca3af":"#fff",
+    border:"none",borderRadius:10,padding:"9px 20px",
+    fontSize:13,fontWeight:700,
+    cursor:disabled?"not-allowed":"pointer",
+    fontFamily:"'Plus Jakarta Sans',sans-serif",
+    boxShadow:disabled?"none":`0 2px 12px ${bg}44`,
+    textDecoration:"none",whiteSpace:"nowrap" as const,
+    transition:"all .15s",
+    minWidth:140,justifyContent:"center",
+  };
+}
+
+type DlState = "idle"|"capturing"|"building"|"saving";
+
+function DownloadBtn({primaryColor,fileName="Resume"}:{primaryColor:string;fileName?:string}) {
+  const [state,setState] = useState<DlState>("idle");
+  const busy = state!=="idle";
+
+  const labels:Record<DlState,string> = {
+    idle:"Download PDF",capturing:"Capturing…",building:"Building PDF…",saving:"Saving…"
+  };
+  const icons:Record<DlState,string> = {
+    idle:"fa-solid fa-download",
+    capturing:"fa-solid fa-spinner fa-spin",
+    building:"fa-solid fa-spinner fa-spin",
+    saving:"fa-solid fa-spinner fa-spin",
+  };
+
+  const handleDownload = async () => {
+    if(busy) return;
+    const el = document.querySelector(".a4") as HTMLElement|null;
+    if(!el){ toast.error("Resume element not found"); return; }
+
+    const toastId = toast.loading("Preparing your PDF…");
+    try {
+      setState("capturing");
+
+      // Dynamic imports — no SSR crash, loaded only when user clicks
+      const [{ default: html2canvas },{ default: jsPDF }] = await Promise.all([
+        import("html2canvas"),
+        import("jspdf"),
+      ]);
+
+      // ── Capture at 2× scale for print quality ──────────────────────────────
+      // windowWidth:794 forces rendering at A4 pixel width (96 dpi)
+      // even on a 375px-wide iPhone screen.
+      const canvas = await html2canvas(el, {
+        scale:           2,
+        useCORS:         true,
+        allowTaint:      false,
+        logging:         false,
+        windowWidth:     794,         // ← KEY: force A4 width on mobile
+        width:           794,
+        height:          el.scrollHeight,
+        scrollY:         0,
+        scrollX:         0,
+        backgroundColor: "#ffffff",
+        imageTimeout:    15_000,
+        removeContainer: true,
+      });
+
+      // ── Build PDF ───────────────────────────────────────────────────────────
+      setState("building");
+      toast.loading("Building PDF…",{id:toastId});
+
+      const PDF_W = 210;   // mm
+      const PDF_H = 297;   // mm
+
+      const pdf = new jsPDF({
+        orientation:"portrait",
+        unit:"mm",
+        format:"a4",
+        compress:true,
+      });
+
+      // Convert canvas → JPEG (smaller file, still crisp at 2×)
+      const imgData  = canvas.toDataURL("image/jpeg",0.97);
+      const imgW_MM  = PDF_W;
+      const imgH_MM  = (canvas.height/canvas.width)*imgW_MM;
+
+      // Multi-page support: slice image into PDF_H chunks
+      let yOffset  = 0;
+      let remaining = imgH_MM;
+      let firstPage = true;
+
+      while(remaining>0) {
+        if(!firstPage) pdf.addPage();
+        // Place image shifted up by accumulated yOffset so each page shows the next slice
+        pdf.addImage(imgData,"JPEG",0,-yOffset,imgW_MM,imgH_MM,undefined,"FAST");
+        yOffset   += PDF_H;
+        remaining -= PDF_H;
+        firstPage  = false;
+      }
+
+      // ── Save / trigger download ─────────────────────────────────────────────
+      setState("saving");
+      toast.loading("Saving…",{id:toastId});
+
+      const outFile = `${fileName}.pdf`;
+
+      if(isIOS()) {
+        // iOS Safari: create blob URL + hidden anchor click
+        // Explicitly declare MIME type so iOS doesn't treat it as text/html
+        const blob    = new Blob([pdf.output("arraybuffer")],{type:"application/pdf"});
+        const blobURL = URL.createObjectURL(blob);
+
+        const a     = document.createElement("a");
+        a.href      = blobURL;
+        a.download  = outFile;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+
+        // Delay revoke — iOS needs a moment before the system picks up the download
+        setTimeout(()=>URL.revokeObjectURL(blobURL),3_000);
+      } else {
+        // Desktop + Android Chrome — jsPDF's native save is most reliable
+        pdf.save(outFile);
+      }
+
+      toast.success("Download complete! ✅",{id:toastId});
+    } catch(err) {
+      console.error("[DownloadBtn]",err);
+      toast.error("Failed to generate PDF — please try again",{id:toastId});
+    } finally {
+      setTimeout(()=>setState("idle"),800);
+    }
+  };
+
+  return (
+    <button onClick={handleDownload} disabled={busy} style={dlBtnStyle(primaryColor,busy)} aria-label={labels[state]}>
+      <i className={icons[state]} style={{fontSize:11}}/>
+      {labels[state]}
+    </button>
+  );
+}
+
+
+
+export default function SaveResume({
+  resumeData,
+  template,
+  color,
+}: {
+  resumeData: ResumeData;
+  template: TemplateName;
+  color: ColorName;
 }) {
-  const c = PC[color];
-  const serif = ["elegant","classic","chronological","executive"].includes(template);
-  const f  = serif ? "Times-Roman"  : "Helvetica";
-  const fb = serif ? "Times-Bold"   : "Helvetica-Bold";
+  const { data: session } = useSession();
 
-  const s = StyleSheet.create({
-    page:      {backgroundColor:"#fff",paddingTop:36,paddingBottom:36,paddingHorizontal:40,fontFamily:f,fontSize:9.5,color:"#374151",lineHeight:1.45},
-    secPlain:  {fontSize:8.5,fontFamily:fb,textTransform:"uppercase",letterSpacing:1,color:c.p,paddingBottom:3,marginBottom:7,marginTop:12,borderBottomWidth:1,borderBottomColor:c.b},
-    secLine:   {fontSize:9,fontFamily:fb,textTransform:"uppercase",letterSpacing:0.8,color:"#374151",paddingBottom:3,marginBottom:7,marginTop:12,borderBottomWidth:0.75,borderBottomColor:c.b},
-    secDot:    {fontSize:8.5,fontFamily:fb,textTransform:"uppercase",letterSpacing:1,color:c.p,paddingBottom:3,marginBottom:7,marginTop:12},
-    eRow:      {flexDirection:"row",justifyContent:"space-between",alignItems:"flex-start"},
-    eTitle:    {fontSize:10,fontFamily:fb,color:c.p},
-    eTitleBlk: {fontSize:10,fontFamily:fb,color:"#111827"},
-    eOrg:      {fontSize:9,fontFamily:fb,color:"#374151"},
-    eDate:     {fontSize:8.5,color:"#9ca3af"},
-    eDesc:     {fontSize:9,color:"#6b7280",lineHeight:1.5,marginTop:2},
-    eBlock:    {marginBottom:8},
-    certRow:   {flexDirection:"row",justifyContent:"space-between",marginBottom:3},
-    certName:  {fontSize:9,fontFamily:fb,color:"#374151"},
-    certMeta:  {fontSize:8.5,color:"#9ca3af"},
-    cRow:      {flexDirection:"row",flexWrap:"wrap",gap:10,marginTop:6},
-    cItem:     {fontSize:8.5,color:"#6b7280"},
-    cItemW:    {fontSize:8.5,color:"#ffffffcc"},
-    twoWrap:   {flexDirection:"row",gap:18},
-    twoL:      {flex:2},
-    twoR:      {flex:1},
-    hdrBand:   {backgroundColor:c.p,paddingVertical:24,paddingHorizontal:40,marginTop:-36,marginLeft:-40,marginRight:-40,marginBottom:16},
-    hdrWhite:  {paddingBottom:10,marginBottom:12,borderBottomWidth:1.5,borderBottomColor:c.b},
-    nameWht:   {fontSize:22,fontFamily:fb,color:"#fff",letterSpacing:0.3},
-    nameDk:    {fontSize:20,fontFamily:fb,color:"#111827"},
-    jobColor:  {fontSize:9.5,color:c.p,marginTop:3,fontFamily:fb},
-    jobWht:    {fontSize:9.5,color:"#ffffffdd",marginTop:3,fontFamily:fb},
-    sec:       {marginBottom:0},
-    skillRow:  {flexDirection:"row",flexWrap:"wrap",marginBottom:3,gap:2},
-    skillLabel:{fontSize:9,fontFamily:fb,color:c.p},
-    skillVal:  {fontSize:9,color:"#6b7280",flex:1,flexWrap:"wrap"},
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState("");
+
+  const handleSave = async () => {
+    if (!title) {
+      toast.error("Please enter a title");
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/resumes/save", {
+        method: "POST",
+        credentials: "include", // 🔥 important
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title,
+          template,
+          color,
+          data: resumeData,
+        }),
+      });
+
+      const result = await res.json();
+
+      if (!res.ok) {
+        throw new Error(result.error || "Failed to save");
+      }
+
+      toast.success("Resume saved successfully 🎉");
+      setOpen(false);
+      setTitle("");
+    } catch (err: any) {
+      toast.error(err.message);
+    }
+  };
+
+  return (
+    <>
+      {/* SAVE BUTTON */}
+      <button
+        onClick={() => setOpen(true)}
+        className="px-4 py-2 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700"
+      >
+        Save Resume
+      </button>
+
+      {/* MODAL */}
+      {open && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white p-6 rounded-xl w-full max-w-md shadow-xl">
+            <h2 className="text-lg font-bold mb-3">Save Resume</h2>
+
+            <input
+              type="text"
+              placeholder="Enter resume title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              className="w-full border p-2 rounded-md mb-4"
+            />
+
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setOpen(false)}
+                className="px-3 py-2 text-gray-600"
+              >
+                Cancel
+              </button>
+
+              <button
+                onClick={handleSave}
+                className="px-4 py-2 bg-black text-white rounded-lg"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ResumePDF  (unchanged from previous version — kept for PDFDownloadLink fallback)
+// ═══════════════════════════════════════════════════════════════
+export function ResumePDF({data,template="chronological",color="blue"}:{data:ResumeData;template:TemplateName;color:ColorName}) {
+  const c=PC[color];
+  const serif=["elegant","classic","chronological","executive"].includes(template);
+  const f=serif?"Times-Roman":"Helvetica";
+  const fb=serif?"Times-Bold":"Helvetica-Bold";
+  const s=StyleSheet.create({
+    page:{backgroundColor:"#fff",paddingTop:36,paddingBottom:36,paddingHorizontal:40,fontFamily:f,fontSize:9.5,color:"#374151",lineHeight:1.45},
+    secPlain:{fontSize:8.5,fontFamily:fb,textTransform:"uppercase",letterSpacing:1,color:c.p,paddingBottom:3,marginBottom:7,marginTop:12,borderBottomWidth:1,borderBottomColor:c.b},
+    secLine:{fontSize:9,fontFamily:fb,textTransform:"uppercase",letterSpacing:0.8,color:"#374151",paddingBottom:3,marginBottom:7,marginTop:12,borderBottomWidth:0.75,borderBottomColor:c.b},
+    secDot:{fontSize:8.5,fontFamily:fb,textTransform:"uppercase",letterSpacing:1,color:c.p,paddingBottom:3,marginBottom:7,marginTop:12},
+    eRow:{flexDirection:"row",justifyContent:"space-between",alignItems:"flex-start"},
+    eTitle:{fontSize:10,fontFamily:fb,color:c.p},
+    eTitleBlk:{fontSize:10,fontFamily:fb,color:"#111827"},
+    eOrg:{fontSize:9,fontFamily:fb,color:"#374151"},
+    eDate:{fontSize:8.5,color:"#9ca3af"},
+    eDesc:{fontSize:9,color:"#6b7280",lineHeight:1.5,marginTop:2},
+    eBlock:{marginBottom:8},
+    certRow:{flexDirection:"row",justifyContent:"space-between",marginBottom:3},
+    certName:{fontSize:9,fontFamily:fb,color:"#374151"},
+    certMeta:{fontSize:8.5,color:"#9ca3af"},
+    cRow:{flexDirection:"row",flexWrap:"wrap",gap:10,marginTop:6},
+    cItem:{fontSize:8.5,color:"#6b7280"},
+    cItemW:{fontSize:8.5,color:"#ffffffcc"},
+    twoWrap:{flexDirection:"row",gap:18},
+    twoL:{flex:2},twoR:{flex:1},
+    hdrBand:{backgroundColor:c.p,paddingVertical:24,paddingHorizontal:40,marginTop:-36,marginLeft:-40,marginRight:-40,marginBottom:16},
+    hdrWhite:{paddingBottom:10,marginBottom:12,borderBottomWidth:1.5,borderBottomColor:c.b},
+    nameWht:{fontSize:22,fontFamily:fb,color:"#fff",letterSpacing:0.3},
+    nameDk:{fontSize:20,fontFamily:fb,color:"#111827"},
+    jobColor:{fontSize:9.5,color:c.p,marginTop:3,fontFamily:fb},
+    jobWht:{fontSize:9.5,color:"#ffffffdd",marginTop:3,fontFamily:fb},
+    sec:{marginBottom:0},
   });
-
-  const ST = ({t,style}:{t:string;style:any}) => <Text style={style}>{t}</Text>;
-
-  const Contacts = ({ts}:{ts:any}) => (
+  const ST=({t,style}:{t:string;style:any})=><Text style={style}>{t}</Text>;
+  const Contacts=({ts}:{ts:any})=>(
     <View style={s.cRow}>
-      {data.contact.email    && <Text style={ts}>{data.contact.email}</Text>}
-      {data.contact.phone    && <Text style={ts}>· {data.contact.phone}</Text>}
-      {data.contact.city     && <Text style={ts}>· {data.contact.city}{data.contact.country?`, ${data.contact.country}`:""}</Text>}
-      {data.contact.linkedin && <Text style={ts}>· {data.contact.linkedin}</Text>}
-      {data.contact.website  && <Text style={ts}>· {data.contact.website}</Text>}
+      {data.contact.email&&<Text style={ts}>{data.contact.email}</Text>}
+      {data.contact.phone&&<Text style={ts}>· {data.contact.phone}</Text>}
+      {data.contact.city&&<Text style={ts}>· {data.contact.city}{data.contact.country?`, ${data.contact.country}`:""}</Text>}
+      {data.contact.linkedin&&<Text style={ts}>· {data.contact.linkedin}</Text>}
+      {data.contact.website&&<Text style={ts}>· {data.contact.website}</Text>}
     </View>
   );
-
-  // ─── PDF Grouped Skills ───────────────────────────────────────
-  const SecSkillsPDF = ({ss}:{ss:any}) => {
-    const groups = data.skillGroups.filter(g=>g.heading&&g.skills.trim());
+  const SecSkillsPDF=({ss}:{ss:any})=>{
+    const groups=data.skillGroups.filter(g=>g.heading&&g.skills.trim());
     if(!groups.length) return null;
-    return (
+    return(
       <View style={s.sec}>
         <ST t="Skills" style={ss}/>
-        {groups.map(g=>{
-          const chips = g.skills.split(",").map(sk=>sk.trim()).filter(Boolean);
-          return (
-            <View key={g.id} style={{flexDirection:"row",marginBottom:3,flexWrap:"wrap"}}>
-              <Text style={{fontSize:9,fontFamily:fb,color:c.p}}>{g.heading}: </Text>
-              <Text style={{fontSize:9,color:"#6b7280",flex:1}}>{chips.join(", ")}</Text>
-            </View>
-          );
-        })}
+        {groups.map(g=>(
+          <View key={g.id} style={{flexDirection:"row",marginBottom:3,flexWrap:"wrap"}}>
+            <Text style={{fontSize:9,fontFamily:fb,color:c.p}}>{g.heading}: </Text>
+            <Text style={{fontSize:9,color:"#6b7280",flex:1}}>{g.skills.split(",").map((s:string)=>s.trim()).filter(Boolean).join(", ")}</Text>
+          </View>
+        ))}
       </View>
     );
   };
-
-  const SecExp = ({ss}:{ss:any}) => !data.experience.length ? null : (
+  const SecExp=({ss}:{ss:any})=>!data.experience.length?null:(
     <View style={s.sec}>
       <ST t="Professional Experience" style={ss}/>
       {data.experience.map(e=>(
@@ -201,7 +432,7 @@ export function ResumePDF({data,template="chronological",color="blue"}:{
       ))}
     </View>
   );
-  const SecEdu = ({ss}:{ss:any}) => !data.education.length ? null : (
+  const SecEdu=({ss}:{ss:any})=>!data.education.length?null:(
     <View style={s.sec}>
       <ST t="Education" style={ss}/>
       {data.education.map(e=>(
@@ -213,7 +444,7 @@ export function ResumePDF({data,template="chronological",color="blue"}:{
       ))}
     </View>
   );
-  const SecProj = ({ss}:{ss:any}) => !data.projects.length ? null : (
+  const SecProj=({ss}:{ss:any})=>!data.projects.length?null:(
     <View style={s.sec}>
       <ST t="Projects" style={ss}/>
       {data.projects.map(p=>(
@@ -227,7 +458,7 @@ export function ResumePDF({data,template="chronological",color="blue"}:{
       ))}
     </View>
   );
-  const SecCerts = ({ss}:{ss:any}) => !data.certs.length ? null : (
+  const SecCerts=({ss}:{ss:any})=>!data.certs.length?null:(
     <View style={s.sec}>
       <ST t="Certifications" style={ss}/>
       {data.certs.map(cert=>(
@@ -238,13 +469,13 @@ export function ResumePDF({data,template="chronological",color="blue"}:{
       ))}
     </View>
   );
-  const SecSum = ({ss,label}:{ss:any;label?:string}) => !data.summary ? null : (
+  const SecSum=({ss,label}:{ss:any;label?:string})=>!data.summary?null:(
     <View style={s.sec}>
       <ST t={label||"Professional Summary"} style={ss}/>
       <Text style={s.eDesc}>{data.summary}</Text>
     </View>
   );
-  const SecCustom = ({ss}:{ss:any}) => (
+  const SecCustom=({ss}:{ss:any})=>(
     <>{data.custom.filter(cx=>cx.heading).map(cx=>(
       <View key={cx.id} style={s.sec}>
         <ST t={cx.heading} style={ss}/>
@@ -252,51 +483,21 @@ export function ResumePDF({data,template="chronological",color="blue"}:{
       </View>
     ))}</>
   );
-
-  const name = fn(data);
-  const newTemplates = ["centered","grid","sidebar","infographic","timeline"];
-
-  // All new templates + unhandled fall back to chronological PDF style
-  if(newTemplates.includes(template)||!["chronological","functional","combination","executive","colorband"].includes(template)) {
-    return (
-      <Document><Page size="A4" style={s.page}>
-        <View style={s.hdrWhite}>
-          <Text style={s.nameDk}>{name}</Text>
-          {data.contact.jobTitle&&<Text style={s.jobColor}>{data.contact.jobTitle}</Text>}
-          <Contacts ts={s.cItem}/>
-        </View>
-        <SecSum ss={s.secLine}/><SecExp ss={s.secLine}/><SecEdu ss={s.secLine}/>
-        <SecSkillsPDF ss={s.secLine}/><SecCerts ss={s.secLine}/><SecProj ss={s.secLine}/><SecCustom ss={s.secLine}/>
-      </Page></Document>
-    );
-  }
-
-  if(template==="chronological") return (
+  const name=fn(data);
+  // all non-listed templates fall back to chronological PDF
+  const needsBand=["colorband","gradient","vivid","sidebar","infographic","centered","grid","timeline"].includes(template);
+  if(needsBand) return(
     <Document><Page size="A4" style={s.page}>
-      <View style={s.hdrWhite}>
-        <Text style={s.nameDk}>{name}</Text>
-        {data.contact.jobTitle&&<Text style={s.jobColor}>{data.contact.jobTitle}</Text>}
-        <Contacts ts={s.cItem}/>
+      <View style={s.hdrBand}>
+        <Text style={s.nameWht}>{name}</Text>
+        {data.contact.jobTitle&&<Text style={s.jobWht}>{data.contact.jobTitle}</Text>}
+        <Contacts ts={s.cItemW}/>
       </View>
-      <SecSum ss={s.secLine}/><SecExp ss={s.secLine}/><SecEdu ss={s.secLine}/>
-      <SecSkillsPDF ss={s.secLine}/><SecCerts ss={s.secLine}/><SecProj ss={s.secLine}/><SecCustom ss={s.secLine}/>
+      <SecSum ss={s.secPlain}/><SecExp ss={s.secPlain}/><SecEdu ss={s.secPlain}/>
+      <SecSkillsPDF ss={s.secPlain}/><SecProj ss={s.secPlain}/><SecCerts ss={s.secPlain}/><SecCustom ss={s.secPlain}/>
     </Page></Document>
   );
-
-  if(template==="functional") return (
-    <Document><Page size="A4" style={s.page}>
-      <View style={s.hdrWhite}>
-        <Text style={s.nameDk}>{name}</Text>
-        {data.contact.jobTitle&&<Text style={s.jobColor}>{data.contact.jobTitle}</Text>}
-        <Contacts ts={s.cItem}/>
-      </View>
-      <SecSkillsPDF ss={s.secPlain}/>
-      <SecSum ss={s.secPlain} label="Professional Profile"/>
-      <SecExp ss={s.secPlain}/><SecEdu ss={s.secPlain}/><SecCerts ss={s.secPlain}/><SecProj ss={s.secPlain}/><SecCustom ss={s.secPlain}/>
-    </Page></Document>
-  );
-
-  if(template==="combination") return (
+  if(template==="combination"||template==="tech") return(
     <Document><Page size="A4" style={s.page}>
       <View style={s.hdrWhite}>
         <Text style={s.nameDk}>{name}</Text>
@@ -310,11 +511,10 @@ export function ResumePDF({data,template="chronological",color="blue"}:{
       </View>
     </Page></Document>
   );
-
-  if(template==="executive") return (
+  if(template==="executive") return(
     <Document><Page size="A4" style={s.page}>
       <View style={{borderBottomWidth:2,borderBottomColor:c.b,paddingBottom:12,marginBottom:14}}>
-        <Text style={{fontSize:22,fontFamily:fb,color:"#111827",letterSpacing:0.5}}>{name}</Text>
+        <Text style={{fontSize:22,fontFamily:fb,color:"#111827"}}>{name}</Text>
         {data.contact.jobTitle&&<Text style={{fontSize:10,color:c.p,fontFamily:fb,marginTop:3}}>{data.contact.jobTitle}</Text>}
         <Contacts ts={s.cItem}/>
       </View>
@@ -325,116 +525,40 @@ export function ResumePDF({data,template="chronological",color="blue"}:{
       </View>
     </Page></Document>
   );
-
-  // colorband
-  return (
+  // default / functional / minimal / compact / elegant / classic / modern / chronological
+  return(
     <Document><Page size="A4" style={s.page}>
-      <View style={s.hdrBand}>
-        <Text style={s.nameWht}>{name}</Text>
-        {data.contact.jobTitle&&<Text style={s.jobWht}>{data.contact.jobTitle}</Text>}
-        <Contacts ts={s.cItemW}/>
+      <View style={s.hdrWhite}>
+        <Text style={s.nameDk}>{name}</Text>
+        {data.contact.jobTitle&&<Text style={s.jobColor}>{data.contact.jobTitle}</Text>}
+        <Contacts ts={s.cItem}/>
       </View>
-      <SecSum ss={s.secPlain}/><SecExp ss={s.secPlain}/><SecEdu ss={s.secPlain}/>
-      <SecSkillsPDF ss={s.secPlain}/><SecProj ss={s.secPlain}/><SecCerts ss={s.secPlain}/><SecCustom ss={s.secPlain}/>
+      {template==="functional"
+        ? <><SecSkillsPDF ss={s.secPlain}/><SecSum ss={s.secPlain} label="Professional Profile"/><SecExp ss={s.secPlain}/><SecEdu ss={s.secPlain}/><SecCerts ss={s.secPlain}/><SecProj ss={s.secPlain}/><SecCustom ss={s.secPlain}/></>
+        : <><SecSum ss={s.secLine}/><SecExp ss={s.secLine}/><SecEdu ss={s.secLine}/><SecSkillsPDF ss={s.secLine}/><SecCerts ss={s.secLine}/><SecProj ss={s.secLine}/><SecCustom ss={s.secLine}/></>}
     </Page></Document>
   );
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Download Button
-// ═══════════════════════════════════════════════════════════════
-function dlStyle(bg:string,disabled?:boolean):React.CSSProperties {
-  return {display:"flex",alignItems:"center",gap:8,background:disabled?"#e5e7eb":bg,color:disabled?"#9ca3af":"#fff",border:"none",borderRadius:10,padding:"9px 20px",fontSize:13,fontWeight:700,cursor:disabled?"not-allowed":"pointer",fontFamily:"'Plus Jakarta Sans',sans-serif",boxShadow:disabled?"none":`0 2px 12px ${bg}44`,textDecoration:"none",whiteSpace:"nowrap" as const};
-}
-
-
-function DownloadBtn({data,template,color}:{data:ResumeData;template:TemplateName;color:ColorName}) {
-  const [isDownloading,setIsDownloading]=useState(false);
-  const c=HC[color];
-  const fileName=`${data.contact.firstName||"Resume"}_${data.contact.lastName||"CV"}.pdf`;
-
-  const handleDownload=async()=>{
-    const element=document.querySelector(".a4");
-    if(!element) return;
-    
-    try {
-      setIsDownloading(true);
-      const toastId=toast.loading("Generating PDF...");
-      
-      // Enforce absolute width so the server-side browser doesn't try to render a mobile layout
-      const html=`<html><head><meta charset="utf-8"/><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"/><style>body{margin:0; background:white;}.a4{width:794px;min-height:1123px;}</style></head><body>${element.outerHTML}</body></html>`;
-      
-      const res=await fetch("/api/pdf",{
-        method:"POST",
-        headers: { "Content-Type": "application/json" },
-        body:JSON.stringify({html})
-      });
-
-      // CRITICAL FIX 1: Prevent downloading HTML error pages as PDFs
-      if (!res.ok) {
-        throw new Error("Server failed to generate PDF");
-      }
-
-      const rawBlob = await res.blob();
-      
-      // CRITICAL FIX 2: Explicitly declare the MIME type for mobile OS handling
-      const pdfBlob = new Blob([rawBlob], { type: 'application/pdf' });
-      const url = window.URL.createObjectURL(pdfBlob);
-      
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fileName;
-      
-      // CRITICAL FIX 3: Append element to DOM before clicking (Required by iOS/Mobile Safari)
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      
-      toast.success("Download complete!",{id:toastId});
-
-      // CRITICAL FIX 4: Add a slight delay before revoking the URL for older mobile devices
-      setTimeout(() => {
-        window.URL.revokeObjectURL(url);
-      }, 1000);
-
-    } catch(err) {
-      console.error(err);
-      toast.error("Failed to download PDF");
-    } finally {
-      setIsDownloading(false);
-    }
-  };
-
-  // Fixed the dlStyle call to pass the disabled state correctly
-  return(
-    <button onClick={handleDownload} style={dlStyle(c.p, isDownloading)} disabled={isDownloading}>
-      {isDownloading?<><i className="fa-solid fa-spinner fa-spin" style={{fontSize:11}}/> Downloading...</>:<><i className="fa-solid fa-download" style={{fontSize:11}}/> Download PDF</>}
-    </button>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════
-// HTML PREVIEW — all 18 templates
+// HTML PREVIEW — all 18 templates (unchanged from previous)
 // ═══════════════════════════════════════════════════════════════
 function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName) {
   const c=HC[color];
   type SecVariant="accent"|"serif-accent"|"dot"|"dark-serif"|"white"|"centered";
-
   const SecTitle=({t,variant="accent"}:{t:string;variant?:SecVariant})=>{
     const base:React.CSSProperties={fontSize:8,fontWeight:800,textTransform:"uppercase" as const,letterSpacing:"0.13em",marginBottom:7,marginTop:16,paddingBottom:4};
-    if(variant==="white")   return <div style={{...base,color:"rgba(255,255,255,0.7)",borderBottom:"1px solid rgba(255,255,255,0.2)"}}>{t}</div>;
-    if(variant==="centered")return <div style={{...base,color:c.p,textAlign:"center",borderBottom:`1.5px solid ${c.b}`,paddingBottom:6,marginBottom:10}}>{t}</div>;
+    if(variant==="white") return <div style={{...base,color:"rgba(255,255,255,0.7)",borderBottom:"1px solid rgba(255,255,255,0.2)"}}>{t}</div>;
+    if(variant==="centered") return <div style={{...base,color:c.p,textAlign:"center",borderBottom:`1.5px solid ${c.b}`,paddingBottom:6,marginBottom:10}}>{t}</div>;
     if(variant==="serif-accent") return <div style={{...base,color:c.p,borderBottom:`1.5px solid ${c.b}`,fontFamily:"Georgia,serif",letterSpacing:"0.1em"}}>{t}</div>;
-    if(variant==="dot")     return <div style={{...base,color:c.p,borderBottom:"none",display:"flex",alignItems:"center",gap:6}}><span style={{display:"inline-block",width:5,height:5,borderRadius:"50%",background:c.p,flexShrink:0}}/>{t}</div>;
+    if(variant==="dot") return <div style={{...base,color:c.p,borderBottom:"none",display:"flex",alignItems:"center",gap:6}}><span style={{display:"inline-block",width:5,height:5,borderRadius:"50%",background:c.p,flexShrink:0}}/>{t}</div>;
     if(variant==="dark-serif") return <div style={{...base,color:"#1e293b",borderBottom:`1px solid ${c.b}`,fontFamily:"Georgia,serif"}}>{t}</div>;
     return <div style={{...base,color:c.p,borderBottom:`1.5px solid ${c.b}`}}>{t}</div>;
   };
-
-  const titleStyle:React.CSSProperties  ={fontWeight:700,fontSize:10.5,color:"#111827"};
+  const titleStyle:React.CSSProperties={fontWeight:700,fontSize:10.5,color:"#111827"};
   const subtitleStyle:React.CSSProperties={fontSize:9.5,fontWeight:600,color:"#374151",marginTop:1};
-  const metaStyle:React.CSSProperties   ={fontSize:9,color:"#000000"};
-  const bodyStyle:React.CSSProperties   ={fontSize:9.5,color:"#000000",lineHeight:1.65,marginTop:3,whiteSpace:"pre-line" as const};
-
+  const metaStyle:React.CSSProperties={fontSize:9,color:"#000000"};
+  const bodyStyle:React.CSSProperties={fontSize:9.5,color:"#000000",lineHeight:1.65,marginTop:3,whiteSpace:"pre-line" as const};
   const EBlock=({children}:{children:React.ReactNode})=><div style={{marginBottom:9}}>{children}</div>;
   const ERow=({l,r}:{l:React.ReactNode;r:string})=>(
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
@@ -442,9 +566,8 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
       {r&&<span style={{...metaStyle,whiteSpace:"nowrap",flexShrink:0}}>{r}</span>}
     </div>
   );
-
   const ContactRow=({tc="dark"}:{tc?:"dark"|"muted"|"white"|"centered"})=>{
-    const textColor=tc==="white"?"rgba(255,255,255,0.8)":tc==="muted"?"#1d2626":"#1d2626";
+    const textColor=tc==="white"?"rgba(255,255,255,0.8)":"#1d2626";
     const ic={marginRight:3,fontSize:7.5} as React.CSSProperties;
     return(
       <div style={{display:"flex",flexWrap:"wrap",gap:"0 14px",marginTop:7,justifyContent:tc==="centered"?"center":"flex-start"}}>
@@ -456,9 +579,6 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
       </div>
     );
   };
-
-  // ─── GROUPED SKILLS BLOCK ─────────────────────────────────────────────────
-  // Renders: "Languages: JavaScript, TypeScript, Python"
   const SkillsBlock=({variant="accent"}:{variant?:SecVariant})=>{
     const groups=data.skillGroups.filter(g=>g.heading&&g.skills.trim());
     if(!groups.length) return null;
@@ -468,11 +588,11 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
         <SecTitle t="Skills" variant={variant}/>
         <div style={{display:"flex",flexDirection:"column",gap:4,marginTop:2}}>
           {groups.map(g=>{
-            const chips=g.skills.split(",").map(s=>s.trim()).filter(Boolean);
+            const chips=g.skills.split(",").map((s:string)=>s.trim()).filter(Boolean);
             return(
               <div key={g.id} style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"baseline",fontSize:9.5,lineHeight:1.7}}>
                 <span style={{fontWeight:700,color:isWhite?"rgba(255,255,255,0.9)":c.p,flexShrink:0,whiteSpace:"nowrap"}}>{g.heading}:</span>
-                <span style={{color:isWhite?"#1d2626":"#1d2626"}}>{chips.join(", ")}</span> 
+                <span style={{color:isWhite?"rgba(255,255,255,0.75)":"#1d2626"}}>{chips.join(", ")}</span>
               </div>
             );
           })}
@@ -480,8 +600,6 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
       </div>
     );
   };
-
-  // Infographic variant: visual bars using skill.level or fallback %
   const SkillsBarsBlock=()=>{
     const groups=data.skillGroups.filter(g=>g.heading&&g.skills.trim());
     if(!groups.length) return null;
@@ -490,28 +608,24 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
       <div style={{marginBottom:14}}>
         <SecTitle t="Core Competencies"/>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,180px),1fr))",gap:"6px 20px",marginTop:4}}>
-          {groups.flatMap(g=>
-            g.skills.split(",").map(s=>s.trim()).filter(Boolean).map(sk=>{
-              const pct=Math.max(60,70+(idx++%4)*8);
-              return(
-                <div key={g.id+sk}>
-                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                    <span style={{fontSize:"clamp(8px,1.5vw,9.5px)",fontWeight:600,color:"#374151"}}>{sk}</span>
-                    <span style={{fontSize:"clamp(7px,1.5vw,8px)",color:"#1d2626"}}>{pct}%</span>
-                  </div>
-                  <div style={{height:5,background:c.b,borderRadius:3,overflow:"hidden"}}>
-                    <div style={{height:"100%",width:`${pct}%`,background:c.p,borderRadius:3}}/>
-                  </div>
+          {groups.flatMap(g=>g.skills.split(",").map((s:string)=>s.trim()).filter(Boolean).map(sk=>{
+            const pct=Math.max(60,70+(idx++%4)*8);
+            return(
+              <div key={g.id+sk}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                  <span style={{fontSize:9.5,fontWeight:600,color:"#374151"}}>{sk}</span>
+                  <span style={{fontSize:8,color:"#1d2626"}}>{pct}%</span>
                 </div>
-              );
-            })
-          )}
+                <div style={{height:5,background:c.b,borderRadius:3,overflow:"hidden"}}>
+                  <div style={{height:"100%",width:`${pct}%`,background:c.p,borderRadius:3}}/>
+                </div>
+              </div>
+            );
+          }))}
         </div>
       </div>
     );
   };
-
-  // Centered pills variant
   const SkillsCenteredBlock=()=>{
     const groups=data.skillGroups.filter(g=>g.heading&&g.skills.trim());
     if(!groups.length) return null;
@@ -520,7 +634,7 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
         <SecTitle t="Skills" variant="centered"/>
         <div style={{display:"flex",flexDirection:"column",gap:6,marginTop:4}}>
           {groups.map(g=>{
-            const chips=g.skills.split(",").map(s=>s.trim()).filter(Boolean);
+            const chips=g.skills.split(",").map((s:string)=>s.trim()).filter(Boolean);
             return(
               <div key={g.id} style={{textAlign:"center"}}>
                 <span style={{fontSize:8,fontWeight:800,color:c.p,textTransform:"uppercase" as const,letterSpacing:"0.1em",marginRight:6}}>{g.heading}:</span>
@@ -532,8 +646,6 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
       </div>
     );
   };
-
-  // Grid card variant — chips in a card per group
   const SkillsGridBlock=()=>{
     const groups=data.skillGroups.filter(g=>g.heading&&g.skills.trim());
     if(!groups.length) return null;
@@ -541,7 +653,7 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
       <div style={{background:"#f9fafb",border:`1px solid ${c.b}`,borderRadius:8,padding:"12px"}}>
         <SecTitle t="Skills" variant="dot"/>
         {groups.map(g=>{
-          const chips=g.skills.split(",").map(s=>s.trim()).filter(Boolean);
+          const chips=g.skills.split(",").map((s:string)=>s.trim()).filter(Boolean);
           return(
             <div key={g.id} style={{marginBottom:8}}>
               <div style={{fontSize:8.5,fontWeight:700,color:c.p,marginBottom:3}}>{g.heading}</div>
@@ -556,14 +668,12 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
       </div>
     );
   };
-
   const SummaryBlock=({variant="accent",label}:{variant?:SecVariant;label?:string})=>!data.summary?null:(
     <div style={{marginBottom:14}}>
       <SecTitle t={label||"Professional Summary"} variant={variant}/>
       <p style={{...bodyStyle,marginTop:0,textAlign:variant==="centered"?"center":"left"}}>{data.summary}</p>
     </div>
   );
-
   const ExpBlock=({variant="accent"}:{variant?:SecVariant})=>!data.experience.length?null:(
     <div style={{marginBottom:14}}>
       <SecTitle t="Professional Experience" variant={variant}/>
@@ -576,20 +686,18 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
       ))}
     </div>
   );
-
   const EduBlock=({variant="accent"}:{variant?:SecVariant})=>!data.education.length?null:(
     <div style={{marginBottom:14}}>
       <SecTitle t="Education" variant={variant}/>
       {data.education.map(edu=>(
-        <EBlock key={edu.id} >
+        <EBlock key={edu.id}>
           <ERow l={<span style={{...titleStyle,color:variant==="white"?"#fff":titleStyle.color}}>{edu.degree}{edu.field?` in ${edu.field}`:""}</span>} r={ds(edu)}/>
-          <div style={{...subtitleStyle,marginBottom:4,marginTop:4, color:variant==="white"?"rgba(255,255,255,0.7)":subtitleStyle.color}}>{edu.institution}</div>
+          <div style={{...subtitleStyle,marginBottom:4,marginTop:4,color:variant==="white"?"rgba(255,255,255,0.7)":subtitleStyle.color}}>{edu.institution}</div>
           {edu.grade&&<div style={{...metaStyle,color:variant==="white"?"rgba(255,255,255,0.5)":metaStyle.color}}>Grade: {edu.grade}</div>}
         </EBlock>
       ))}
     </div>
   );
-
   const ProjectsBlock=({variant="accent"}:{variant?:SecVariant})=>!data.projects.length?null:(
     <div style={{marginBottom:14}}>
       <SecTitle t="Projects" variant={variant}/>
@@ -604,7 +712,6 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
       ))}
     </div>
   );
-
   const CertsBlock=({variant="accent"}:{variant?:SecVariant})=>!data.certs.length?null:(
     <div style={{marginBottom:14}}>
       <SecTitle t="Certifications" variant={variant}/>
@@ -616,7 +723,6 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
       ))}
     </div>
   );
-
   const CustomBlocks=({variant="accent"}:{variant?:SecVariant})=>(
     <>{data.custom.filter(cx=>cx.heading).map(cx=>(
       <div key={cx.id} style={{marginBottom:14}}>
@@ -625,433 +731,33 @@ function useTemplateRender(data:ResumeData,template:TemplateName,color:ColorName
       </div>
     ))}</>
   );
-
   const name=fn(data);
   const pad="clamp(18px,4vw,32px) clamp(18px,4vw,38px) clamp(20px,4vw,36px)";
   const padN="0 clamp(18px,4vw,38px) clamp(20px,4vw,36px)";
 
-  // ══════════════════════════════════════════════════════════════
-  // ALL 18 TEMPLATES
-  // ══════════════════════════════════════════════════════════════
-
-  if(template==="chronological") return (
-    <div style={{fontFamily:"Georgia,serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}>
-      <div style={{borderBottom:`2px solid ${c.b}`,paddingBottom:12,marginBottom:4}}>
-        <div style={{fontSize:"clamp(16px,4vw,24px)",fontWeight:800,color:"#111827",letterSpacing:-0.3}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:3}}>{data.contact.jobTitle}</div>}
-        <ContactRow tc="muted"/>
-      </div>
-      <SummaryBlock variant="serif-accent"/><ExpBlock variant="serif-accent"/><EduBlock variant="serif-accent"/>
-      <SkillsBlock variant="serif-accent"/><CertsBlock variant="serif-accent"/><ProjectsBlock variant="serif-accent"/><CustomBlocks variant="serif-accent"/>
-    </div>
-  );
-
-  if(template==="functional") return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}>
-      <div style={{borderBottom:`2px solid ${c.b}`,paddingBottom:12,marginBottom:4}}>
-        <div style={{fontSize:"clamp(16px,4vw,22px)",fontWeight:800,color:"#111827"}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:3}}>{data.contact.jobTitle}</div>}
-        <ContactRow tc="muted"/>
-      </div>
-      <SkillsBlock/><SummaryBlock label="Professional Profile"/>
-      <ExpBlock/><EduBlock/><CertsBlock/><ProjectsBlock/><CustomBlocks/>
-    </div>
-  );
-
-  if(template==="combination") return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}>
-      <div style={{borderBottom:`2px solid ${c.b}`,paddingBottom:12,marginBottom:4}}>
-        <div style={{fontSize:"clamp(16px,4vw,22px)",fontWeight:800,color:"#111827"}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:3}}>{data.contact.jobTitle}</div>}
-        <ContactRow tc="muted"/>
-      </div>
-      <SummaryBlock/>
-      <div style={{display:"grid",gridTemplateColumns:"minmax(0,2fr) minmax(0,1fr)",gap:22,marginTop:4}}>
-        <div><ExpBlock/><ProjectsBlock/><CustomBlocks/></div>
-        <div style={{borderLeft:`1.5px solid ${c.b}`,paddingLeft:18}}>
-          <SkillsBlock variant="dot"/><EduBlock variant="dot"/><CertsBlock variant="dot"/>
-        </div>
-      </div>
-    </div>
-  );
-
-  if(template==="executive") return (
-    <div style={{fontFamily:"Georgia,serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}>
-      <div style={{borderBottom:`2px solid ${c.b}`,paddingBottom:14,marginBottom:4}}>
-        <div style={{fontSize:"clamp(18px,4vw,26px)",fontWeight:900,color:"#111827",letterSpacing:-0.5}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(9.5px,2vw,11.5px)",color:c.p,fontWeight:700,marginTop:4}}>{data.contact.jobTitle}</div>}
-        <ContactRow tc="muted"/>
-      </div>
-      {data.summary&&<p style={{fontSize:"clamp(9px,2vw,11px)",color:"#374151",lineHeight:1.7,fontStyle:"italic",marginTop:14,marginBottom:0}}>{data.summary}</p>}
-      <div style={{display:"grid",gridTemplateColumns:"minmax(0,2fr) minmax(0,1fr)",gap:22,marginTop:4}}>
-        <div><ExpBlock variant="serif-accent"/><ProjectsBlock variant="serif-accent"/><CustomBlocks variant="serif-accent"/></div>
-        <div style={{borderLeft:`1.5px solid ${c.b}`,paddingLeft:18}}>
-          <EduBlock variant="dark-serif"/><SkillsBlock variant="dark-serif"/><CertsBlock variant="dark-serif"/>
-        </div>
-      </div>
-    </div>
-  );
-
-  if(template==="modern") return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}>
-      <div style={{background: "#1e293b",
-  padding: "clamp(16px,3vw,26px) clamp(18px,4vw,38px) clamp(14px,3vw,22px)",borderBottom:`2px solid ${c.b}`}}>
-        <div style={{fontSize:"clamp(16px,4vw,24px)",fontWeight:800,color:"#fff",letterSpacing:-0.3}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:3}}>{data.contact.jobTitle}</div>}
-        <ContactRow tc="white"/>
-      </div>
-      <div style={{padding:padN}}>
-        <SummaryBlock/><ExpBlock/><EduBlock/><SkillsBlock/><ProjectsBlock/><CertsBlock/><CustomBlocks/>
-      </div>
-    </div>
-  );
-
-  if(template==="minimal") return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}>
-      <div style={{marginBottom:16}}>
-        <div style={{fontSize:"clamp(14px,4vw,22px)",fontWeight:300,color:"#111827",letterSpacing:1.5,textTransform:"uppercase"}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(8.5px,2vw,10.5px)",color:c.p,marginTop:4,fontWeight:600,letterSpacing:0.5}}>{data.contact.jobTitle}</div>}
-        <div style={{height:1,background:c.b,margin:"10px 0"}}/><ContactRow tc="muted"/>
-      </div>
-      <SummaryBlock variant="dot"/><ExpBlock variant="dot"/><EduBlock variant="dot"/>
-      <SkillsBlock variant="dot"/><ProjectsBlock variant="dot"/><CertsBlock variant="dot"/><CustomBlocks variant="dot"/>
-    </div>
-  );
-
-  if(template==="compact") return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(8.5px,2vw,10.5px)",color:"#374151",padding:"clamp(16px,3vw,24px) clamp(16px,3.5vw,34px) clamp(18px,3vw,28px)",lineHeight:1.35}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",borderBottom:`1.5px solid ${c.b}`,paddingBottom:8,marginBottom:4,flexWrap:"wrap",gap:8}}>
-        <div>
-          <div style={{fontSize:"clamp(14px,4vw,20px)",fontWeight:800,color:"#111827"}}>{name}</div>
-          {data.contact.jobTitle&&<div style={{fontSize:"clamp(8px,2vw,10px)",color:c.p,fontWeight:700,marginTop:2}}>{data.contact.jobTitle}</div>}
-        </div>
-        <div style={{textAlign:"right"}}>
-          {data.contact.email&&<div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"#6b7280"}}>{data.contact.email}</div>}
-          {data.contact.phone&&<div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"#6b7280"}}>{data.contact.phone}</div>}
-          {data.contact.city&&<div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"#6b7280"}}>{data.contact.city}{data.contact.country?`, ${data.contact.country}`:""}</div>}
-        </div>
-      </div>
-      <SummaryBlock/><ExpBlock/><EduBlock/><SkillsBlock/><ProjectsBlock/><CertsBlock/><CustomBlocks/>
-    </div>
-  );
-
-  if(template==="elegant") return (
-    <div style={{fontFamily:"'Times New Roman',Times,serif",fontSize:"clamp(9.5px,2vw,11.5px)",color:"#374151",padding:pad}}>
-      <div style={{borderLeft:`4px solid ${c.p}`,paddingLeft:16,marginBottom:16}}>
-        <div style={{fontSize:"clamp(16px,4vw,24px)",fontWeight:900,color:"#111827",letterSpacing:0.5}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,marginTop:4,fontWeight:700}}>{data.contact.jobTitle}</div>}
-        <ContactRow tc="muted"/>
-      </div>
-      <SummaryBlock variant="serif-accent"/><ExpBlock variant="serif-accent"/><EduBlock variant="serif-accent"/>
-      <SkillsBlock variant="serif-accent"/><ProjectsBlock variant="serif-accent"/><CertsBlock variant="serif-accent"/><CustomBlocks variant="serif-accent"/>
-    </div>
-  );
-
-  if(template==="classic") return (
-    <div style={{fontFamily:"'Times New Roman',Times,serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}>
-      <div style={{textAlign:"center",borderBottom:`1.5px solid ${c.b}`,paddingBottom:14,marginBottom:4}}>
-        <div style={{fontSize:"clamp(15px,4vw,22px)",fontWeight:900,color:"#111827",letterSpacing:2,textTransform:"uppercase"}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,marginTop:4,fontWeight:700}}>{data.contact.jobTitle}</div>}
-        <ContactRow tc="centered"/>
-      </div>
-      <SummaryBlock variant="dark-serif" label="Professional Summary"/>
-      <EduBlock variant="dark-serif"/><ExpBlock variant="dark-serif"/>
-      <SkillsBlock variant="dark-serif"/>
-      <ProjectsBlock variant="dark-serif"/><CertsBlock variant="dark-serif"/><CustomBlocks variant="dark-serif"/>
-    </div>
-  );
-
-  if(template==="tech") return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}>
-      <div style={{background:c.l,padding:"clamp(14px,3vw,24px) clamp(18px,4vw,38px) clamp(12px,3vw,18px)",borderBottom:`2px solid ${c.b}`}}>
-        <div style={{fontSize:"clamp(15px,4vw,22px)",fontWeight:800,color:"#111827"}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:3}}>{data.contact.jobTitle}</div>}
-        <ContactRow tc="muted"/>
-      </div>
-      <div style={{padding:padN}}>
-        <SkillsBlock/><SummaryBlock label="About"/>
-        <div style={{display:"grid",gridTemplateColumns:"minmax(0,2fr) minmax(0,1fr)",gap:22}}>
-          <div><ExpBlock/><ProjectsBlock/></div>
-          <div style={{borderLeft:`1.5px solid ${c.b}`,paddingLeft:18}}>
-            <EduBlock variant="dot"/><CertsBlock variant="dot"/><CustomBlocks variant="dot"/>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-
-  if(template==="colorband") return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}>
-      <div style={{background:c.p,padding:"clamp(18px,3.5vw,28px) clamp(18px,4vw,38px) clamp(14px,3vw,24px)"}}>
-        <div style={{fontSize:"clamp(16px,4vw,26px)",fontWeight:800,color:"#fff",letterSpacing:-0.5}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:"rgba(255,255,255,0.85)",fontWeight:600,marginTop:4}}>{data.contact.jobTitle}</div>}
-        <ContactRow tc="white"/>
-      </div>
-      <div style={{height:4,background:c.d}}/>
-      <div style={{padding:padN}}>
-        <SummaryBlock/><ExpBlock/><EduBlock/><SkillsBlock/><ProjectsBlock/><CertsBlock/><CustomBlocks/>
-      </div>
-    </div>
-  );
-
-  if(template==="gradient") return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}>
-      <div style={{background:`linear-gradient(135deg, ${c.p} 0%, ${c.d} 100%)`,padding:"clamp(18px,4vw,30px) clamp(18px,4vw,38px) clamp(14px,3vw,26px)"}}>
-        <div style={{fontSize:"clamp(16px,4vw,26px)",fontWeight:800,color:"#fff",letterSpacing:-0.5}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:"rgba(255,255,255,0.9)",fontWeight:600,marginTop:4,letterSpacing:0.5}}>{data.contact.jobTitle}</div>}
-        <ContactRow tc="white"/>
-      </div>
-      <div style={{background:c.l,padding:"8px clamp(18px,4vw,38px)",borderBottom:`1.5px solid ${c.b}`}}>
-        <div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:c.d,fontWeight:600,letterSpacing:"0.08em",display:"flex",flexWrap:"wrap",gap:"0 12px"}}>
-          {data.contact.city&&<span><i className="fa-solid fa-location-dot" style={{marginRight:4}}/>{data.contact.city}</span>}
-          {data.contact.linkedin&&<span><i className="fa-brands fa-linkedin" style={{marginRight:4}}/>{data.contact.linkedin}</span>}
-          {data.contact.website&&<span><i className="fa-solid fa-globe" style={{marginRight:4}}/>{data.contact.website}</span>}
-        </div>
-      </div>
-      <div style={{padding:padN}}>
-        <SummaryBlock variant="dot"/><ExpBlock variant="dot"/><EduBlock variant="dot"/>
-        <SkillsBlock variant="dot"/><ProjectsBlock variant="dot"/><CertsBlock variant="dot"/><CustomBlocks variant="dot"/>
-      </div>
-    </div>
-  );
-
-  if(template==="vivid") return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}>
-      <div style={{display:"flex"}}>
-        <div style={{background:c.p,width:"clamp(6px,1.5vw,10px)",minHeight:130,flexShrink:0}}/>
-        <div style={{flex:1,padding:"clamp(16px,3vw,26px) clamp(18px,4vw,38px) clamp(14px,3vw,22px)",borderBottom:`2px solid ${c.b}`}}>
-          <div style={{fontSize:"clamp(18px,4.5vw,28px)",fontWeight:900,color:"#111827",letterSpacing:-0.5,lineHeight:1}}>{name}</div>
-          {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:800,marginTop:6,textTransform:"uppercase",letterSpacing:1}}>{data.contact.jobTitle}</div>}
-          <div style={{height:3,background:c.l,margin:"10px 0",borderRadius:2}}/><ContactRow tc="muted"/>
-        </div>
-      </div>
-      <div style={{padding:padN}}>
-        <SummaryBlock/><ExpBlock/><EduBlock/><SkillsBlock/><ProjectsBlock/><CertsBlock/><CustomBlocks/>
-      </div>
-    </div>
-  );
-
-  // ─── CENTERED ──────────────────────────────────────────────────────────────
-  if(template==="centered") return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}>
-      <div style={{textAlign:"center",borderBottom:`2px solid ${c.b}`,paddingBottom:16,marginBottom:4}}>
-        <div style={{fontSize:"clamp(18px,5vw,28px)",fontWeight:900,color:"#111827",letterSpacing:2,textTransform:"uppercase",display:"inline-block",borderBottom:`3px solid ${c.p}`,paddingBottom:6,marginBottom:8}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:4,letterSpacing:1,textTransform:"uppercase"}}>{data.contact.jobTitle}</div>}
-        <div style={{display:"flex",flexWrap:"wrap",gap:"4px 8px",marginTop:12,justifyContent:"center"}}>
-          {data.contact.email&&<span style={{background:c.l,color:c.d,border:`1px solid ${c.b}`,borderRadius:20,padding:"2px 10px",fontSize:"clamp(7px,1.5vw,8.5px)",fontWeight:600}}><i className="fa-solid fa-envelope" style={{marginRight:4,fontSize:7}}/>{data.contact.email}</span>}
-          {data.contact.phone&&<span style={{background:c.l,color:c.d,border:`1px solid ${c.b}`,borderRadius:20,padding:"2px 10px",fontSize:"clamp(7px,1.5vw,8.5px)",fontWeight:600}}><i className="fa-solid fa-phone" style={{marginRight:4,fontSize:7}}/>{data.contact.phone}</span>}
-          {data.contact.city&&<span style={{background:c.l,color:c.d,border:`1px solid ${c.b}`,borderRadius:20,padding:"2px 10px",fontSize:"clamp(7px,1.5vw,8.5px)",fontWeight:600}}><i className="fa-solid fa-location-dot" style={{marginRight:4,fontSize:7}}/>{data.contact.city}{data.contact.country?`, ${data.contact.country}`:""}</span>}
-          {data.contact.linkedin&&<span style={{background:c.l,color:c.d,border:`1px solid ${c.b}`,borderRadius:20,padding:"2px 10px",fontSize:"clamp(7px,1.5vw,8.5px)",fontWeight:600}}><i className="fa-brands fa-linkedin" style={{marginRight:4,fontSize:7}}/>{data.contact.linkedin}</span>}
-        </div>
-      </div>
-      {data.summary&&<div style={{marginBottom:14}}>
-        <SecTitle t="Profile" variant="centered"/>
-        <p style={{...bodyStyle,textAlign:"center",maxWidth:"80%",margin:"0 auto",fontSize:"clamp(9px,2vw,10.5px)"}}>{data.summary}</p>
-      </div>}
-      <SkillsCenteredBlock/>
-      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:"0 28px"}}>
-        <div><ExpBlock/><ProjectsBlock/><CustomBlocks/></div>
-        <div style={{borderLeft:`2px solid ${c.b}`,paddingLeft:22}}><EduBlock/><CertsBlock/></div>
-      </div>
-    </div>
-  );
-
-  // ─── GRID ──────────────────────────────────────────────────────────────────
-  if(template==="grid") return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}>
-      <div style={{background:c.p,padding:"clamp(16px,3vw,24px) clamp(18px,4vw,38px) clamp(14px,3vw,20px)"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
-          <div>
-            <div style={{fontSize:"clamp(16px,4vw,24px)",fontWeight:900,color:"#fff",letterSpacing:-0.3}}>{name}</div>
-            {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,10.5px)",color:"rgba(255,255,255,0.85)",fontWeight:600,marginTop:4}}>{data.contact.jobTitle}</div>}
-          </div>
-          <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:2}}>
-            {data.contact.email&&<span style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.8)"}}>{data.contact.email}</span>}
-            {data.contact.phone&&<span style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.8)"}}>{data.contact.phone}</span>}
-            {data.contact.city&&<span style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.8)"}}>{data.contact.city}{data.contact.country?`, ${data.contact.country}`:""}</span>}
-          </div>
-        </div>
-      </div>
-      <div style={{height:4,background:c.d}}/>
-      <div style={{padding:padN}}>
-        {data.summary&&<div style={{marginBottom:14}}><SecTitle t="Summary"/><p style={{...bodyStyle,marginTop:0}}>{data.summary}</p></div>}
-        {data.experience.length>0&&<div style={{marginBottom:14}}>
-          <SecTitle t="Professional Experience"/>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(min(100%,220px),1fr))",gap:8,marginTop:4}}>
-            {data.experience.map(exp=>(
-              <div key={exp.id} style={{background:c.l,border:`1px solid ${c.b}`,borderRadius:8,padding:"10px 12px",borderLeft:`3px solid ${c.p}`}}>
-                <div style={{...titleStyle,fontSize:"clamp(9px,2vw,10.5px)",color:c.d}}>{exp.position||"Position"}</div>
-                <div style={{...subtitleStyle,fontSize:9}}>{exp.company}</div>
-                <div style={{...metaStyle,fontSize:8,marginTop:2}}>{ds(exp)}</div>
-                {exp.description&&<div style={{...bodyStyle,fontSize:"clamp(7.5px,1.5vw,9px)",marginTop:4,lineHeight:1.5}}>{exp.description.slice(0,120)}{exp.description.length>120?"…":""}</div>}
-              </div>
-            ))}
-          </div>
-        </div>}
-        {data.education.length>0&&<div style={{marginBottom:14}}>
-          <SecTitle t="Education"/>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(min(100%,220px),1fr))",gap:8,marginTop:4}}>
-            {data.education.map(edu=>(
-              <div key={edu.id} style={{background:"#f9fafb",border:`1px solid ${c.b}`,borderRadius:8,padding:"10px 12px",borderTop:`3px solid ${c.p}`}}>
-                <div style={{...titleStyle,fontSize:"clamp(9px,2vw,10.5px)"}}>{edu.degree}{edu.field?` in ${edu.field}`:""}</div>
-                <div style={subtitleStyle}>{edu.institution}</div>
-                <div style={metaStyle}>{ds(edu)}</div>
-              </div>
-            ))}
-          </div>
-        </div>}
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,160px),1fr))",gap:12,marginTop:4}}>
-          <SkillsGridBlock/>
-          {data.certs.length>0&&(
-            <div style={{background:"#f9fafb",border:`1px solid ${c.b}`,borderRadius:8,padding:"12px"}}>
-              <SecTitle t="Certifications" variant="dot"/>
-              {data.certs.map(cert=>(
-                <div key={cert.id} style={{marginBottom:6}}>
-                  <div style={{...subtitleStyle,fontSize:9}}>{cert.name}</div>
-                  <div style={metaStyle}>{cert.issuer}{cert.year?` · ${cert.year}`:""}</div>
-                </div>
-              ))}
-            </div>
-          )}
-          {data.projects.length>0&&(
-            <div style={{background:"#f9fafb",border:`1px solid ${c.b}`,borderRadius:8,padding:"12px"}}>
-              <SecTitle t="Projects" variant="dot"/>
-              {data.projects.map(p=>(
-                <div key={p.id} style={{marginBottom:6}}>
-                  <div style={{...subtitleStyle,fontSize:9}}>{p.title}</div>
-                  {p.description&&<div style={{...bodyStyle,fontSize:8.5,lineHeight:1.5}}>{p.description.slice(0,80)}{p.description.length>80?"…":""}</div>}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-        <CustomBlocks/>
-      </div>
-    </div>
-  );
-
-  // ─── SIDEBAR ───────────────────────────────────────────────────────────────
-  if(template==="sidebar") return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",display:"flex",minHeight:"100%"}}>
-      <div style={{width:"clamp(140px,30%,200px)",flexShrink:0,background:c.d,color:"#fff",padding:"clamp(20px,3vw,30px) clamp(14px,2.5vw,22px)",display:"flex",flexDirection:"column",gap:0}}>
-        <div style={{width:"clamp(48px,8vw,68px)",height:"clamp(48px,8vw,68px)",borderRadius:"50%",background:"rgba(255,255,255,0.15)",border:"2px solid rgba(255,255,255,0.3)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"clamp(16px,3vw,24px)",fontWeight:800,color:"#fff",marginBottom:14,flexShrink:0}}>
-          {data.contact.firstName?.[0]||"?"}
-        </div>
-        <div style={{fontSize:"clamp(12px,3vw,18px)",fontWeight:800,color:"#fff",lineHeight:1.2,marginBottom:4}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(7.5px,1.5vw,9.5px)",color:"rgba(255,255,255,0.7)",fontWeight:600,marginBottom:14,textTransform:"uppercase",letterSpacing:0.8}}>{data.contact.jobTitle}</div>}
-        <div style={{borderTop:"1px solid rgba(255,255,255,0.15)",paddingTop:12,marginBottom:14}}>
-          {data.contact.email&&<div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.7)",marginBottom:5,wordBreak:"break-all"}}><i className="fa-solid fa-envelope" style={{marginRight:5,fontSize:7,color:"rgba(255,255,255,0.5)"}}/>{data.contact.email}</div>}
-          {data.contact.phone&&<div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.7)",marginBottom:5}}><i className="fa-solid fa-phone" style={{marginRight:5,fontSize:7,color:"rgba(255,255,255,0.5)"}}/>{data.contact.phone}</div>}
-          {data.contact.city&&<div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.7)",marginBottom:5}}><i className="fa-solid fa-location-dot" style={{marginRight:5,fontSize:7,color:"rgba(255,255,255,0.5)"}}/>{data.contact.city}{data.contact.country?`, ${data.contact.country}`:""}</div>}
-          {data.contact.linkedin&&<div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.7)",marginBottom:5,wordBreak:"break-all"}}><i className="fa-brands fa-linkedin" style={{marginRight:5,fontSize:7,color:"rgba(255,255,255,0.5)"}}/>{data.contact.linkedin}</div>}
-        </div>
-        <SkillsBlock variant="white"/>
-        <CertsBlock variant="white"/>
-        <CustomBlocks variant="white"/>
-      </div>
-      <div style={{flex:1,padding:"clamp(20px,3vw,30px) clamp(16px,3vw,28px)",overflowX:"hidden"}}>
-        {data.summary&&<div style={{marginBottom:14}}><SecTitle t="About Me"/><p style={{...bodyStyle,marginTop:0}}>{data.summary}</p></div>}
-        <ExpBlock/><EduBlock/><ProjectsBlock/>
-      </div>
-    </div>
-  );
-
-  // ─── INFOGRAPHIC ───────────────────────────────────────────────────────────
-  if(template==="infographic") return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}>
-      <div style={{background:`linear-gradient(120deg, ${c.d} 0%, ${c.p} 60%, ${c.b} 100%)`,padding:"clamp(20px,4vw,34px) clamp(18px,4vw,40px) clamp(16px,3vw,26px)"}}>
-        <div style={{fontSize:"clamp(20px,5vw,32px)",fontWeight:900,color:"#fff",letterSpacing:-0.5,lineHeight:1}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11.5px)",color:"rgba(255,255,255,0.9)",fontWeight:700,marginTop:6,textTransform:"uppercase",letterSpacing:1.5}}>{data.contact.jobTitle}</div>}
-        <div style={{height:2,background:"rgba(255,255,255,0.25)",margin:"12px 0 10px"}}/>
-        <div style={{display:"flex",flexWrap:"wrap",gap:"4px 20px"}}>
-          {data.contact.email&&<span style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.8)"}}><i className="fa-solid fa-envelope" style={{marginRight:5}}/>{data.contact.email}</span>}
-          {data.contact.phone&&<span style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.8)"}}><i className="fa-solid fa-phone" style={{marginRight:5}}/>{data.contact.phone}</span>}
-          {data.contact.city&&<span style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.8)"}}><i className="fa-solid fa-location-dot" style={{marginRight:5}}/>{data.contact.city}{data.contact.country?`, ${data.contact.country}`:""}</span>}
-          {data.contact.linkedin&&<span style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.8)"}}><i className="fa-brands fa-linkedin" style={{marginRight:5}}/>{data.contact.linkedin}</span>}
-        </div>
-      </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,100px),1fr))",gap:0,borderBottom:`2px solid ${c.b}`}}>
-        {[
-          {icon:"fa-solid fa-briefcase",label:"Experience",val:`${data.experience.length} roles`},
-          {icon:"fa-solid fa-graduation-cap",label:"Education",val:`${data.education.length} degrees`},
-          {icon:"fa-solid fa-code",label:"Skills",val:`${data.skillGroups.reduce((n,g)=>n+g.skills.split(",").filter(s=>s.trim()).length,0)} skills`},
-          {icon:"fa-solid fa-certificate",label:"Certs",val:`${data.certs.length} certs`},
-        ].map((stat,i)=>(
-          <div key={i} style={{textAlign:"center",padding:"12px 6px",borderRight:`1px solid ${c.b}`,background:i%2===0?"#fff":c.l}}>
-            <div style={{fontSize:"clamp(14px,3vw,20px)",color:c.p,marginBottom:4}}><i className={stat.icon}/></div>
-            <div style={{fontSize:"clamp(9px,2vw,11px)",fontWeight:800,color:"#111827"}}>{stat.val}</div>
-            <div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"#9ca3af",textTransform:"uppercase",letterSpacing:0.5}}>{stat.label}</div>
-          </div>
-        ))}
-      </div>
-      <div style={{padding:padN}}>
-        {data.summary&&<div style={{marginBottom:14}}><SecTitle t="Profile"/><p style={{...bodyStyle,marginTop:0}}>{data.summary}</p></div>}
-        <SkillsBarsBlock/>
-        <div style={{display:"grid",gridTemplateColumns:"minmax(0,3fr) minmax(0,2fr)",gap:"0 24px"}}>
-          <div><ExpBlock/><ProjectsBlock/></div>
-          <div><EduBlock/><CertsBlock/></div>
-        </div>
-        <CustomBlocks/>
-      </div>
-    </div>
-  );
-
-  // ─── TIMELINE ──────────────────────────────────────────────────────────────
-  if(template==="timeline") return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}>
-      <div style={{borderBottom:`2px solid ${c.b}`,paddingBottom:14,marginBottom:4}}>
-        <div style={{fontSize:"clamp(16px,4.5vw,26px)",fontWeight:900,color:"#111827",letterSpacing:-0.3}}>{name}</div>
-        {data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:3,textTransform:"uppercase",letterSpacing:0.8}}>{data.contact.jobTitle}</div>}
-        <ContactRow tc="muted"/>
-      </div>
-      {data.summary&&<div style={{marginBottom:14}}><SecTitle t="Summary"/><p style={{...bodyStyle,marginTop:0}}>{data.summary}</p></div>}
-      {data.experience.length>0&&<div style={{marginBottom:14}}>
-        <SecTitle t="Career Timeline"/>
-        <div style={{position:"relative",marginTop:8,paddingLeft:"clamp(22px,5vw,36px)"}}>
-          <div style={{position:"absolute",left:"clamp(7px,1.5vw,12px)",top:6,bottom:6,width:2,background:`linear-gradient(to bottom, ${c.p}, ${c.b})`,borderRadius:1}}/>
-          {data.experience.map((exp,i)=>(
-            <div key={exp.id} style={{position:"relative",marginBottom:i<data.experience.length-1?14:0}}>
-              <div style={{position:"absolute",left:"clamp(-18px,-4vw,-24px)",top:3,width:"clamp(8px,1.5vw,12px)",height:"clamp(8px,1.5vw,12px)",borderRadius:"50%",background:i===0?c.p:"#fff",border:`2px solid ${c.p}`,boxSizing:"border-box" as const,flexShrink:0}}/>
-              <div style={{background:i===0?c.l:"#f9fafb",border:`1px solid ${i===0?c.b:"#e5e7eb"}`,borderLeft:`3px solid ${c.p}`,borderRadius:8,padding:"8px 12px"}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",flexWrap:"wrap",gap:"2px 8px"}}>
-                  <span style={{...titleStyle,fontSize:"clamp(9px,2vw,10.5px)",color:i===0?c.d:titleStyle.color}}>{exp.position||"Position"}</span>
-                  <span style={{...metaStyle,fontSize:"clamp(7px,1.5vw,8px)"}}>{ds(exp)}</span>
-                </div>
-                <div style={{...subtitleStyle,fontSize:"clamp(8px,1.5vw,9px)",marginTop:1}}>{exp.company}</div>
-                {exp.description&&<div style={{...bodyStyle,fontSize:"clamp(8px,1.5vw,9px)",marginTop:4,lineHeight:1.5}}>{exp.description}</div>}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>}
-      {data.education.length>0&&<div style={{marginBottom:14}}>
-        <SecTitle t="Education"/>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(min(100%,200px),1fr))",gap:8,marginTop:6}}>
-          {data.education.map(edu=>(
-            <div key={edu.id} style={{background:c.l,border:`1px solid ${c.b}`,borderRadius:8,padding:"10px 14px",borderTop:`3px solid ${c.p}`}}>
-              <div style={{...titleStyle,fontSize:"clamp(9px,2vw,10px)"}}>{edu.degree}{edu.field?` in ${edu.field}`:""}</div>
-              <div style={subtitleStyle}>{edu.institution}</div>
-              <div style={metaStyle}>{ds(edu)}{edu.grade?` · ${edu.grade}`:""}</div>
-            </div>
-          ))}
-        </div>
-      </div>}
-      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:"0 24px"}}>
-        <div><SkillsBlock/><ProjectsBlock/></div>
-        <div><CertsBlock/><CustomBlocks/></div>
-      </div>
-    </div>
-  );
-
-  return (
-    <div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}>
-      <div style={{fontSize:"clamp(16px,4vw,22px)",fontWeight:800,color:"#111827",marginBottom:8}}>{name}</div>
-    </div>
-  );
+  if(template==="chronological") return(<div style={{fontFamily:"Georgia,serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}><div style={{borderBottom:`2px solid ${c.b}`,paddingBottom:12,marginBottom:4}}><div style={{fontSize:"clamp(16px,4vw,24px)",fontWeight:800,color:"#111827",letterSpacing:-0.3}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:3}}>{data.contact.jobTitle}</div>}<ContactRow tc="muted"/></div><SummaryBlock variant="serif-accent"/><ExpBlock variant="serif-accent"/><EduBlock variant="serif-accent"/><SkillsBlock variant="serif-accent"/><CertsBlock variant="serif-accent"/><ProjectsBlock variant="serif-accent"/><CustomBlocks variant="serif-accent"/></div>);
+  if(template==="functional") return(<div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}><div style={{borderBottom:`2px solid ${c.b}`,paddingBottom:12,marginBottom:4}}><div style={{fontSize:"clamp(16px,4vw,22px)",fontWeight:800,color:"#111827"}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:3}}>{data.contact.jobTitle}</div>}<ContactRow tc="muted"/></div><SkillsBlock/><SummaryBlock label="Professional Profile"/><ExpBlock/><EduBlock/><CertsBlock/><ProjectsBlock/><CustomBlocks/></div>);
+  if(template==="combination") return(<div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}><div style={{borderBottom:`2px solid ${c.b}`,paddingBottom:12,marginBottom:4}}><div style={{fontSize:"clamp(16px,4vw,22px)",fontWeight:800,color:"#111827"}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:3}}>{data.contact.jobTitle}</div>}<ContactRow tc="muted"/></div><SummaryBlock/><div style={{display:"grid",gridTemplateColumns:"minmax(0,2fr) minmax(0,1fr)",gap:22,marginTop:4}}><div><ExpBlock/><ProjectsBlock/><CustomBlocks/></div><div style={{borderLeft:`1.5px solid ${c.b}`,paddingLeft:18}}><SkillsBlock variant="dot"/><EduBlock variant="dot"/><CertsBlock variant="dot"/></div></div></div>);
+  if(template==="executive") return(<div style={{fontFamily:"Georgia,serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}><div style={{borderBottom:`2px solid ${c.b}`,paddingBottom:14,marginBottom:4}}><div style={{fontSize:"clamp(18px,4vw,26px)",fontWeight:900,color:"#111827",letterSpacing:-0.5}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9.5px,2vw,11.5px)",color:c.p,fontWeight:700,marginTop:4}}>{data.contact.jobTitle}</div>}<ContactRow tc="muted"/></div>{data.summary&&<p style={{fontSize:"clamp(9px,2vw,11px)",color:"#374151",lineHeight:1.7,fontStyle:"italic",marginTop:14,marginBottom:0}}>{data.summary}</p>}<div style={{display:"grid",gridTemplateColumns:"minmax(0,2fr) minmax(0,1fr)",gap:22,marginTop:4}}><div><ExpBlock variant="serif-accent"/><ProjectsBlock variant="serif-accent"/><CustomBlocks variant="serif-accent"/></div><div style={{borderLeft:`1.5px solid ${c.b}`,paddingLeft:18}}><EduBlock variant="dark-serif"/><SkillsBlock variant="dark-serif"/><CertsBlock variant="dark-serif"/></div></div></div>);
+  if(template==="modern") return(<div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}><div style={{background:"#1e293b",padding:"clamp(16px,3vw,26px) clamp(18px,4vw,38px) clamp(14px,3vw,22px)",borderBottom:`2px solid ${c.b}`}}><div style={{fontSize:"clamp(16px,4vw,24px)",fontWeight:800,color:"#fff",letterSpacing:-0.3}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:3}}>{data.contact.jobTitle}</div>}<ContactRow tc="white"/></div><div style={{padding:padN}}><SummaryBlock/><ExpBlock/><EduBlock/><SkillsBlock/><ProjectsBlock/><CertsBlock/><CustomBlocks/></div></div>);
+  if(template==="minimal") return(<div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}><div style={{marginBottom:16}}><div style={{fontSize:"clamp(14px,4vw,22px)",fontWeight:300,color:"#111827",letterSpacing:1.5,textTransform:"uppercase"}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(8.5px,2vw,10.5px)",color:c.p,marginTop:4,fontWeight:600,letterSpacing:0.5}}>{data.contact.jobTitle}</div>}<div style={{height:1,background:c.b,margin:"10px 0"}}/><ContactRow tc="muted"/></div><SummaryBlock variant="dot"/><ExpBlock variant="dot"/><EduBlock variant="dot"/><SkillsBlock variant="dot"/><ProjectsBlock variant="dot"/><CertsBlock variant="dot"/><CustomBlocks variant="dot"/></div>);
+  if(template==="compact") return(<div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(8.5px,2vw,10.5px)",color:"#374151",padding:"clamp(16px,3vw,24px) clamp(16px,3.5vw,34px) clamp(18px,3vw,28px)",lineHeight:1.35}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",borderBottom:`1.5px solid ${c.b}`,paddingBottom:8,marginBottom:4,flexWrap:"wrap",gap:8}}><div><div style={{fontSize:"clamp(14px,4vw,20px)",fontWeight:800,color:"#111827"}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(8px,2vw,10px)",color:c.p,fontWeight:700,marginTop:2}}>{data.contact.jobTitle}</div>}</div><div style={{textAlign:"right"}}>{data.contact.email&&<div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"#6b7280"}}>{data.contact.email}</div>}{data.contact.phone&&<div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"#6b7280"}}>{data.contact.phone}</div>}{data.contact.city&&<div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"#6b7280"}}>{data.contact.city}{data.contact.country?`, ${data.contact.country}`:""}</div>}</div></div><SummaryBlock/><ExpBlock/><EduBlock/><SkillsBlock/><ProjectsBlock/><CertsBlock/><CustomBlocks/></div>);
+  if(template==="elegant") return(<div style={{fontFamily:"'Times New Roman',Times,serif",fontSize:"clamp(9.5px,2vw,11.5px)",color:"#374151",padding:pad}}><div style={{borderLeft:`4px solid ${c.p}`,paddingLeft:16,marginBottom:16}}><div style={{fontSize:"clamp(16px,4vw,24px)",fontWeight:900,color:"#111827",letterSpacing:0.5}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,marginTop:4,fontWeight:700}}>{data.contact.jobTitle}</div>}<ContactRow tc="muted"/></div><SummaryBlock variant="serif-accent"/><ExpBlock variant="serif-accent"/><EduBlock variant="serif-accent"/><SkillsBlock variant="serif-accent"/><ProjectsBlock variant="serif-accent"/><CertsBlock variant="serif-accent"/><CustomBlocks variant="serif-accent"/></div>);
+  if(template==="classic") return(<div style={{fontFamily:"'Times New Roman',Times,serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}><div style={{textAlign:"center",borderBottom:`1.5px solid ${c.b}`,paddingBottom:14,marginBottom:4}}><div style={{fontSize:"clamp(15px,4vw,22px)",fontWeight:900,color:"#111827",letterSpacing:2,textTransform:"uppercase"}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,marginTop:4,fontWeight:700}}>{data.contact.jobTitle}</div>}<ContactRow tc="centered"/></div><SummaryBlock variant="dark-serif" label="Professional Summary"/><EduBlock variant="dark-serif"/><ExpBlock variant="dark-serif"/><SkillsBlock variant="dark-serif"/><ProjectsBlock variant="dark-serif"/><CertsBlock variant="dark-serif"/><CustomBlocks variant="dark-serif"/></div>);
+  if(template==="tech") return(<div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}><div style={{background:c.l,padding:"clamp(14px,3vw,24px) clamp(18px,4vw,38px) clamp(12px,3vw,18px)",borderBottom:`2px solid ${c.b}`}}><div style={{fontSize:"clamp(15px,4vw,22px)",fontWeight:800,color:"#111827"}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:3}}>{data.contact.jobTitle}</div>}<ContactRow tc="muted"/></div><div style={{padding:padN}}><SkillsBlock/><SummaryBlock label="About"/><div style={{display:"grid",gridTemplateColumns:"minmax(0,2fr) minmax(0,1fr)",gap:22}}><div><ExpBlock/><ProjectsBlock/></div><div style={{borderLeft:`1.5px solid ${c.b}`,paddingLeft:18}}><EduBlock variant="dot"/><CertsBlock variant="dot"/><CustomBlocks variant="dot"/></div></div></div></div>);
+  if(template==="colorband") return(<div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}><div style={{background:c.p,padding:"clamp(18px,3.5vw,28px) clamp(18px,4vw,38px) clamp(14px,3vw,24px)"}}><div style={{fontSize:"clamp(16px,4vw,26px)",fontWeight:800,color:"#fff",letterSpacing:-0.5}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:"rgba(255,255,255,0.85)",fontWeight:600,marginTop:4}}>{data.contact.jobTitle}</div>}<ContactRow tc="white"/></div><div style={{height:4,background:c.d}}/><div style={{padding:padN}}><SummaryBlock/><ExpBlock/><EduBlock/><SkillsBlock/><ProjectsBlock/><CertsBlock/><CustomBlocks/></div></div>);
+  if(template==="gradient") return(<div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}><div style={{background:`linear-gradient(135deg, ${c.p} 0%, ${c.d} 100%)`,padding:"clamp(18px,4vw,30px) clamp(18px,4vw,38px) clamp(14px,3vw,26px)"}}><div style={{fontSize:"clamp(16px,4vw,26px)",fontWeight:800,color:"#fff",letterSpacing:-0.5}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:"rgba(255,255,255,0.9)",fontWeight:600,marginTop:4,letterSpacing:0.5}}>{data.contact.jobTitle}</div>}<ContactRow tc="white"/></div><div style={{background:c.l,padding:"8px clamp(18px,4vw,38px)",borderBottom:`1.5px solid ${c.b}`}}><div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:c.d,fontWeight:600,letterSpacing:"0.08em",display:"flex",flexWrap:"wrap",gap:"0 12px"}}>{data.contact.city&&<span><i className="fa-solid fa-location-dot" style={{marginRight:4}}/>{data.contact.city}</span>}{data.contact.linkedin&&<span><i className="fa-brands fa-linkedin" style={{marginRight:4}}/>{data.contact.linkedin}</span>}{data.contact.website&&<span><i className="fa-solid fa-globe" style={{marginRight:4}}/>{data.contact.website}</span>}</div></div><div style={{padding:padN}}><SummaryBlock variant="dot"/><ExpBlock variant="dot"/><EduBlock variant="dot"/><SkillsBlock variant="dot"/><ProjectsBlock variant="dot"/><CertsBlock variant="dot"/><CustomBlocks variant="dot"/></div></div>);
+  if(template==="vivid") return(<div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}><div style={{display:"flex"}}><div style={{background:c.p,width:"clamp(6px,1.5vw,10px)",minHeight:130,flexShrink:0}}/><div style={{flex:1,padding:"clamp(16px,3vw,26px) clamp(18px,4vw,38px) clamp(14px,3vw,22px)",borderBottom:`2px solid ${c.b}`}}><div style={{fontSize:"clamp(18px,4.5vw,28px)",fontWeight:900,color:"#111827",letterSpacing:-0.5,lineHeight:1}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:800,marginTop:6,textTransform:"uppercase",letterSpacing:1}}>{data.contact.jobTitle}</div>}<div style={{height:3,background:c.l,margin:"10px 0",borderRadius:2}}/><ContactRow tc="muted"/></div></div><div style={{padding:padN}}><SummaryBlock/><ExpBlock/><EduBlock/><SkillsBlock/><ProjectsBlock/><CertsBlock/><CustomBlocks/></div></div>);
+  if(template==="centered") return(<div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}><div style={{textAlign:"center",borderBottom:`2px solid ${c.b}`,paddingBottom:16,marginBottom:4}}><div style={{fontSize:"clamp(18px,5vw,28px)",fontWeight:900,color:"#111827",letterSpacing:2,textTransform:"uppercase",display:"inline-block",borderBottom:`3px solid ${c.p}`,paddingBottom:6,marginBottom:8}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:4,letterSpacing:1,textTransform:"uppercase"}}>{data.contact.jobTitle}</div>}<div style={{display:"flex",flexWrap:"wrap",gap:"4px 8px",marginTop:12,justifyContent:"center"}}>{data.contact.email&&<span style={{background:c.l,color:c.d,border:`1px solid ${c.b}`,borderRadius:20,padding:"2px 10px",fontSize:"clamp(7px,1.5vw,8.5px)",fontWeight:600}}><i className="fa-solid fa-envelope" style={{marginRight:4,fontSize:7}}/>{data.contact.email}</span>}{data.contact.phone&&<span style={{background:c.l,color:c.d,border:`1px solid ${c.b}`,borderRadius:20,padding:"2px 10px",fontSize:"clamp(7px,1.5vw,8.5px)",fontWeight:600}}><i className="fa-solid fa-phone" style={{marginRight:4,fontSize:7}}/>{data.contact.phone}</span>}{data.contact.city&&<span style={{background:c.l,color:c.d,border:`1px solid ${c.b}`,borderRadius:20,padding:"2px 10px",fontSize:"clamp(7px,1.5vw,8.5px)",fontWeight:600}}><i className="fa-solid fa-location-dot" style={{marginRight:4,fontSize:7}}/>{data.contact.city}</span>}{data.contact.linkedin&&<span style={{background:c.l,color:c.d,border:`1px solid ${c.b}`,borderRadius:20,padding:"2px 10px",fontSize:"clamp(7px,1.5vw,8.5px)",fontWeight:600}}><i className="fa-brands fa-linkedin" style={{marginRight:4,fontSize:7}}/>{data.contact.linkedin}</span>}</div></div>{data.summary&&<div style={{marginBottom:14}}><SecTitle t="Profile" variant="centered"/><p style={{...bodyStyle,textAlign:"center",maxWidth:"80%",margin:"0 auto",fontSize:"clamp(9px,2vw,10.5px)"}}>{data.summary}</p></div>}<SkillsCenteredBlock/><div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:"0 28px"}}><div><ExpBlock/><ProjectsBlock/><CustomBlocks/></div><div style={{borderLeft:`2px solid ${c.b}`,paddingLeft:22}}><EduBlock/><CertsBlock/></div></div></div>);
+  if(template==="grid") return(<div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}><div style={{background:c.p,padding:"clamp(16px,3vw,24px) clamp(18px,4vw,38px) clamp(14px,3vw,20px)"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}><div><div style={{fontSize:"clamp(16px,4vw,24px)",fontWeight:900,color:"#fff",letterSpacing:-0.3}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,10.5px)",color:"rgba(255,255,255,0.85)",fontWeight:600,marginTop:4}}>{data.contact.jobTitle}</div>}</div><div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:2}}>{data.contact.email&&<span style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.8)"}}>{data.contact.email}</span>}{data.contact.phone&&<span style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.8)"}}>{data.contact.phone}</span>}{data.contact.city&&<span style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.8)"}}>{data.contact.city}</span>}</div></div></div><div style={{height:4,background:c.d}}/><div style={{padding:padN}}>{data.summary&&<div style={{marginBottom:14}}><SecTitle t="Summary"/><p style={{...bodyStyle,marginTop:0}}>{data.summary}</p></div>}{data.experience.length>0&&<div style={{marginBottom:14}}><SecTitle t="Professional Experience"/><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(min(100%,220px),1fr))",gap:8,marginTop:4}}>{data.experience.map(exp=>(<div key={exp.id} style={{background:c.l,border:`1px solid ${c.b}`,borderRadius:8,padding:"10px 12px",borderLeft:`3px solid ${c.p}`}}><div style={{...titleStyle,fontSize:"clamp(9px,2vw,10.5px)",color:c.d}}>{exp.position||"Position"}</div><div style={{...subtitleStyle,fontSize:9}}>{exp.company}</div><div style={{...metaStyle,fontSize:8,marginTop:2}}>{ds(exp)}</div>{exp.description&&<div style={{...bodyStyle,fontSize:"clamp(7.5px,1.5vw,9px)",marginTop:4,lineHeight:1.5}}>{exp.description.slice(0,120)}{exp.description.length>120?"…":""}</div>}</div>))}</div></div>}{data.education.length>0&&<div style={{marginBottom:14}}><SecTitle t="Education"/><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(min(100%,220px),1fr))",gap:8,marginTop:4}}>{data.education.map(edu=>(<div key={edu.id} style={{background:"#f9fafb",border:`1px solid ${c.b}`,borderRadius:8,padding:"10px 12px",borderTop:`3px solid ${c.p}`}}><div style={{...titleStyle,fontSize:"clamp(9px,2vw,10.5px)"}}>{edu.degree}{edu.field?` in ${edu.field}`:""}</div><div style={subtitleStyle}>{edu.institution}</div><div style={metaStyle}>{ds(edu)}</div></div>))}</div></div>}<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,160px),1fr))",gap:12,marginTop:4}}><SkillsGridBlock/>{data.certs.length>0&&(<div style={{background:"#f9fafb",border:`1px solid ${c.b}`,borderRadius:8,padding:"12px"}}><SecTitle t="Certifications" variant="dot"/>{data.certs.map(cert=>(<div key={cert.id} style={{marginBottom:6}}><div style={{...subtitleStyle,fontSize:9}}>{cert.name}</div><div style={metaStyle}>{cert.issuer}{cert.year?` · ${cert.year}`:""}</div></div>))}</div>)}{data.projects.length>0&&(<div style={{background:"#f9fafb",border:`1px solid ${c.b}`,borderRadius:8,padding:"12px"}}><SecTitle t="Projects" variant="dot"/>{data.projects.map(p=>(<div key={p.id} style={{marginBottom:6}}><div style={{...subtitleStyle,fontSize:9}}>{p.title}</div>{p.description&&<div style={{...bodyStyle,fontSize:8.5,lineHeight:1.5}}>{p.description.slice(0,80)}{p.description.length>80?"…":""}</div>}</div>))}</div>)}</div><CustomBlocks/></div></div>);
+  if(template==="sidebar") return(<div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",display:"flex",minHeight:"100%"}}><div style={{width:"clamp(140px,30%,200px)",flexShrink:0,background:c.d,color:"#fff",padding:"clamp(20px,3vw,30px) clamp(14px,2.5vw,22px)",display:"flex",flexDirection:"column",gap:0}}><div style={{width:"clamp(48px,8vw,68px)",height:"clamp(48px,8vw,68px)",borderRadius:"50%",background:"rgba(255,255,255,0.15)",border:"2px solid rgba(255,255,255,0.3)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"clamp(16px,3vw,24px)",fontWeight:800,color:"#fff",marginBottom:14,flexShrink:0}}>{data.contact.firstName?.[0]||"?"}</div><div style={{fontSize:"clamp(12px,3vw,18px)",fontWeight:800,color:"#fff",lineHeight:1.2,marginBottom:4}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(7.5px,1.5vw,9.5px)",color:"rgba(255,255,255,0.7)",fontWeight:600,marginBottom:14,textTransform:"uppercase",letterSpacing:0.8}}>{data.contact.jobTitle}</div>}<div style={{borderTop:"1px solid rgba(255,255,255,0.15)",paddingTop:12,marginBottom:14}}>{data.contact.email&&<div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.7)",marginBottom:5,wordBreak:"break-all"}}><i className="fa-solid fa-envelope" style={{marginRight:5,fontSize:7,color:"rgba(255,255,255,0.5)"}}/>{data.contact.email}</div>}{data.contact.phone&&<div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.7)",marginBottom:5}}><i className="fa-solid fa-phone" style={{marginRight:5,fontSize:7,color:"rgba(255,255,255,0.5)"}}/>{data.contact.phone}</div>}{data.contact.city&&<div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.7)",marginBottom:5}}><i className="fa-solid fa-location-dot" style={{marginRight:5,fontSize:7,color:"rgba(255,255,255,0.5)"}}/>{data.contact.city}{data.contact.country?`, ${data.contact.country}`:""}</div>}{data.contact.linkedin&&<div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.7)",marginBottom:5,wordBreak:"break-all"}}><i className="fa-brands fa-linkedin" style={{marginRight:5,fontSize:7,color:"rgba(255,255,255,0.5)"}}/>{data.contact.linkedin}</div>}</div><SkillsBlock variant="white"/><CertsBlock variant="white"/><CustomBlocks variant="white"/></div><div style={{flex:1,padding:"clamp(20px,3vw,30px) clamp(16px,3vw,28px)",overflowX:"hidden"}}>{data.summary&&<div style={{marginBottom:14}}><SecTitle t="About Me"/><p style={{...bodyStyle,marginTop:0}}>{data.summary}</p></div>}<ExpBlock/><EduBlock/><ProjectsBlock/></div></div>);
+  if(template==="infographic") return(<div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151"}}><div style={{background:`linear-gradient(120deg, ${c.d} 0%, ${c.p} 60%, ${c.b} 100%)`,padding:"clamp(20px,4vw,34px) clamp(18px,4vw,40px) clamp(16px,3vw,26px)"}}><div style={{fontSize:"clamp(20px,5vw,32px)",fontWeight:900,color:"#fff",letterSpacing:-0.5,lineHeight:1}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11.5px)",color:"rgba(255,255,255,0.9)",fontWeight:700,marginTop:6,textTransform:"uppercase",letterSpacing:1.5}}>{data.contact.jobTitle}</div>}<div style={{height:2,background:"rgba(255,255,255,0.25)",margin:"12px 0 10px"}}/><div style={{display:"flex",flexWrap:"wrap",gap:"4px 20px"}}>{data.contact.email&&<span style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.8)"}}><i className="fa-solid fa-envelope" style={{marginRight:5}}/>{data.contact.email}</span>}{data.contact.phone&&<span style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.8)"}}><i className="fa-solid fa-phone" style={{marginRight:5}}/>{data.contact.phone}</span>}{data.contact.city&&<span style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.8)"}}><i className="fa-solid fa-location-dot" style={{marginRight:5}}/>{data.contact.city}</span>}{data.contact.linkedin&&<span style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"rgba(255,255,255,0.8)"}}><i className="fa-brands fa-linkedin" style={{marginRight:5}}/>{data.contact.linkedin}</span>}</div></div><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,100px),1fr))",gap:0,borderBottom:`2px solid ${c.b}`}}>{[{icon:"fa-solid fa-briefcase",label:"Experience",val:`${data.experience.length} roles`},{icon:"fa-solid fa-graduation-cap",label:"Education",val:`${data.education.length} degrees`},{icon:"fa-solid fa-code",label:"Skills",val:`${data.skillGroups.reduce((n:number,g:SkillGroup)=>n+g.skills.split(",").filter((s:string)=>s.trim()).length,0)} skills`},{icon:"fa-solid fa-certificate",label:"Certs",val:`${data.certs.length} certs`}].map((stat,i)=>(<div key={i} style={{textAlign:"center",padding:"12px 6px",borderRight:`1px solid ${c.b}`,background:i%2===0?"#fff":c.l}}><div style={{fontSize:"clamp(14px,3vw,20px)",color:c.p,marginBottom:4}}><i className={stat.icon}/></div><div style={{fontSize:"clamp(9px,2vw,11px)",fontWeight:800,color:"#111827"}}>{stat.val}</div><div style={{fontSize:"clamp(7px,1.5vw,8.5px)",color:"#9ca3af",textTransform:"uppercase",letterSpacing:0.5}}>{stat.label}</div></div>))}</div><div style={{padding:padN}}>{data.summary&&<div style={{marginBottom:14}}><SecTitle t="Profile"/><p style={{...bodyStyle,marginTop:0}}>{data.summary}</p></div>}<SkillsBarsBlock/><div style={{display:"grid",gridTemplateColumns:"minmax(0,3fr) minmax(0,2fr)",gap:"0 24px"}}><div><ExpBlock/><ProjectsBlock/></div><div><EduBlock/><CertsBlock/></div></div><CustomBlocks/></div></div>);
+  if(template==="timeline") return(<div style={{fontFamily:"'Helvetica Neue',sans-serif",fontSize:"clamp(9px,2vw,11px)",color:"#374151",padding:pad}}><div style={{borderBottom:`2px solid ${c.b}`,paddingBottom:14,marginBottom:4}}><div style={{fontSize:"clamp(16px,4.5vw,26px)",fontWeight:900,color:"#111827",letterSpacing:-0.3}}>{name}</div>{data.contact.jobTitle&&<div style={{fontSize:"clamp(9px,2vw,11px)",color:c.p,fontWeight:700,marginTop:3,textTransform:"uppercase",letterSpacing:0.8}}>{data.contact.jobTitle}</div>}<ContactRow tc="muted"/></div>{data.summary&&<div style={{marginBottom:14}}><SecTitle t="Summary"/><p style={{...bodyStyle,marginTop:0}}>{data.summary}</p></div>}{data.experience.length>0&&<div style={{marginBottom:14}}><SecTitle t="Career Timeline"/><div style={{position:"relative",marginTop:8,paddingLeft:"clamp(22px,5vw,36px)"}}><div style={{position:"absolute",left:"clamp(7px,1.5vw,12px)",top:6,bottom:6,width:2,background:`linear-gradient(to bottom, ${c.p}, ${c.b})`,borderRadius:1}}/>{data.experience.map((exp,i)=>(<div key={exp.id} style={{position:"relative",marginBottom:i<data.experience.length-1?14:0}}><div style={{position:"absolute",left:"clamp(-18px,-4vw,-24px)",top:3,width:"clamp(8px,1.5vw,12px)",height:"clamp(8px,1.5vw,12px)",borderRadius:"50%",background:i===0?c.p:"#fff",border:`2px solid ${c.p}`,boxSizing:"border-box" as const,flexShrink:0}}/><div style={{background:i===0?c.l:"#f9fafb",border:`1px solid ${i===0?c.b:"#e5e7eb"}`,borderLeft:`3px solid ${c.p}`,borderRadius:8,padding:"8px 12px"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",flexWrap:"wrap",gap:"2px 8px"}}><span style={{...titleStyle,fontSize:"clamp(9px,2vw,10.5px)",color:i===0?c.d:titleStyle.color}}>{exp.position||"Position"}</span><span style={{...metaStyle,fontSize:"clamp(7px,1.5vw,8px)"}}>{ds(exp)}</span></div><div style={{...subtitleStyle,fontSize:"clamp(8px,1.5vw,9px)",marginTop:1}}>{exp.company}</div>{exp.description&&<div style={{...bodyStyle,fontSize:"clamp(8px,1.5vw,9px)",marginTop:4,lineHeight:1.5}}>{exp.description}</div>}</div></div>))}</div></div>}{data.education.length>0&&<div style={{marginBottom:14}}><SecTitle t="Education"/><div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(min(100%,200px),1fr))",gap:8,marginTop:6}}>{data.education.map(edu=>(<div key={edu.id} style={{background:c.l,border:`1px solid ${c.b}`,borderRadius:8,padding:"10px 14px",borderTop:`3px solid ${c.p}`}}><div style={{...titleStyle,fontSize:"clamp(9px,2vw,10px)"}}>{edu.degree}{edu.field?` in ${edu.field}`:""}</div><div style={subtitleStyle}>{edu.institution}</div><div style={metaStyle}>{ds(edu)}{edu.grade?` · ${edu.grade}`:""}</div></div>))}</div></div>}<div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:"0 24px"}}><div><SkillsBlock/><ProjectsBlock/></div><div><CertsBlock/><CustomBlocks/></div></div></div>);
+  return <div style={{padding:pad,fontFamily:"sans-serif"}}><div style={{fontSize:22,fontWeight:800}}>{name}</div></div>;
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ResumeFullPreview
+// ResumeFullPreview — main exported page component
 // ═══════════════════════════════════════════════════════════════
 export function ResumeFullPreview({data,template:initT="chronological",color:initC="blue"}:{data:ResumeData;template?:TemplateName;color?:ColorName}) {
   const [template,setTemplate]=useState<TemplateName>(initT);
@@ -1062,8 +768,9 @@ export function ResumeFullPreview({data,template:initT="chronological",color:ini
   const ResumeBody=()=><>{useTemplateRender(data,template,color)}</>;
   const atsTemplates=(Object.keys(TEMPLATE_META) as TemplateName[]).filter(t=>!TEMPLATE_META[t].colorful);
   const colorTemplates=(Object.keys(TEMPLATE_META) as TemplateName[]).filter(t=>!!TEMPLATE_META[t].colorful);
+  const fileName=`${data.contact.firstName||"Resume"}_${data.contact.lastName||"CV"}`;
 
-  return (
+  return(
     <>
       <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
       <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"/>
@@ -1071,24 +778,25 @@ export function ResumeFullPreview({data,template:initT="chronological",color:ini
         @media print{.no-print{display:none!important}body{margin:0;background:#fff}.a4{box-shadow:none!important}}
         @page{size:A4;margin:0} *{box-sizing:border-box} body{margin:0;background:#dde3ea}
         .dd-row:hover{background:${c.l}!important}
-        .toolbar-label{display:inline;} .toolbar-ats-badge{display:inline;} .center-info{display:flex;}
-        @media(max-width:700px){.toolbar-label{display:none;}.toolbar-ats-badge{display:none;}.center-info{display:none;}}
-        @media(max-width:900px){.center-info{display:none;}}
+        .toolbar-label{display:inline;}.center-info{display:flex;}
+        @media(max-width:700px){.toolbar-label{display:none;}.center-info{display:none;}}
         .a4-wrapper{padding-top:70px;padding-bottom:48px;min-height:100vh;display:flex;justify-content:center;align-items:flex-start;background:#dde3ea;}
         .a4{width:794px;min-height:1123px;background:#fff;box-shadow:0 4px 40px rgba(0,0,0,0.15);border-radius:2px;overflow:hidden;}
         @media(max-width:860px){.a4-wrapper{padding-left:0;padding-right:0;}.a4{width:100%;min-height:auto;border-radius:0;}}
         @media(max-width:480px){.a4-wrapper{padding-top:58px;padding-bottom:24px;}}
         .dd-panel{position:absolute;top:46px;left:0;z-index:400;background:#fff;border:1px solid #e5e7eb;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,0.13);width:270px;padding:8px;max-height:80vh;overflow-y:auto;}
         .clr-panel{position:absolute;top:46px;left:0;z-index:400;background:#fff;border:1px solid #e5e7eb;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,0.13);width:200px;padding:8px;}
-        @media(max-width:480px){.dd-panel{width:min(270px,90vw);left:-20px;}.clr-panel{width:min(200px,80vw);}}
+        @media(max-width:480px){.dd-panel{width:min(270px,90vw);}.clr-panel{width:min(200px,80vw);}}
       `}</style>
 
+      {/* TOOLBAR */}
       <div className="no-print" style={{position:"fixed",top:0,left:0,right:0,zIndex:300,height:54,background:"#fff",borderBottom:"1px solid #e5e7eb",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 12px",boxShadow:"0 1px 4px rgba(0,0,0,0.06)",fontFamily:"'Plus Jakarta Sans',sans-serif",gap:8}}>
         <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
           <a href="/builder" style={{display:"flex",alignItems:"center",gap:6,textDecoration:"none",background:"#f9fafb",border:"1px solid #e5e7eb",borderRadius:9,padding:"6px 10px",fontSize:12,fontWeight:700,color:"#374151",whiteSpace:"nowrap"}}>
-            <i className="fa-solid fa-arrow-left" style={{fontSize:10,color:"#64748b"}}/><span className="toolbar-label">Back Editing</span>
+            <i className="fa-solid fa-arrow-left" style={{fontSize:10,color:"#64748b"}}/><span className="toolbar-label"> Back</span>
           </a>
           <div style={{width:1,height:20,background:"#e5e7eb"}}/>
+          {/* Template dropdown */}
           <div style={{position:"relative"}}>
             <button onClick={()=>{setTmplOpen(o=>!o);setClrOpen(false);}} style={{display:"flex",alignItems:"center",gap:5,background:tmplOpen?"#f9fafb":"transparent",border:"1px solid #e5e7eb",borderRadius:9,padding:"6px 10px",fontSize:12,fontWeight:600,color:"#374151",cursor:"pointer",fontFamily:"'Plus Jakarta Sans',sans-serif",whiteSpace:"nowrap"}}>
               <i className={TEMPLATE_META[template].icon} style={{fontSize:10,color:tmplOpen?c.p:"#9ca3af"}}/>
@@ -1097,7 +805,7 @@ export function ResumeFullPreview({data,template:initT="chronological",color:ini
             </button>
             {tmplOpen&&(
               <div className="dd-panel">
-                <div style={{fontSize:9.5,fontWeight:800,color:"#9ca3af",textTransform:"uppercase",letterSpacing:"0.12em",padding:"4px 8px 4px"}}><i className="fa-solid fa-shield-check" style={{marginRight:5,color:"#22c55e"}}/>ATS-Friendly</div>
+                <div style={{fontSize:9.5,fontWeight:800,color:"#9ca3af",textTransform:"uppercase",letterSpacing:"0.12em",padding:"4px 8px"}}><i className="fa-solid fa-shield-check" style={{marginRight:5,color:"#22c55e"}}/>ATS-Friendly</div>
                 {atsTemplates.map(t=>(
                   <button key={t} className="dd-row" onClick={()=>{setTemplate(t);setTmplOpen(false);}} style={{width:"100%",display:"flex",alignItems:"center",gap:9,padding:"8px 9px",background:template===t?c.l:"transparent",border:"none",borderRadius:8,cursor:"pointer",textAlign:"left",fontFamily:"'Plus Jakarta Sans',sans-serif"}}>
                     <i className={TEMPLATE_META[t].icon} style={{fontSize:11,color:template===t?c.p:"#9ca3af",width:14}}/>
@@ -1108,12 +816,12 @@ export function ResumeFullPreview({data,template:initT="chronological",color:ini
                       </div>
                       <div style={{fontSize:9.5,color:"#9ca3af"}}>{TEMPLATE_META[t].desc}</div>
                     </div>
-                    <span className="toolbar-ats-badge" style={{fontSize:9,fontWeight:700,color:"#22c55e",background:"#f0fdf4",padding:"1px 5px",borderRadius:4,whiteSpace:"nowrap"}}>{TEMPLATE_META[t].ats}%</span>
+                    <span style={{fontSize:9,fontWeight:700,color:"#22c55e",background:"#f0fdf4",padding:"1px 5px",borderRadius:4,whiteSpace:"nowrap"}}>{TEMPLATE_META[t].ats}%</span>
                     {template===t&&<i className="fa-solid fa-check" style={{fontSize:9,color:c.p}}/>}
                   </button>
                 ))}
                 <div style={{height:1,background:"#f3f4f6",margin:"6px 4px"}}/>
-                <div style={{fontSize:9.5,fontWeight:800,color:"#9ca3af",textTransform:"uppercase",letterSpacing:"0.12em",padding:"4px 8px 4px"}}><i className="fa-solid fa-palette" style={{marginRight:5,color:c.p}}/>Colorful</div>
+                <div style={{fontSize:9.5,fontWeight:800,color:"#9ca3af",textTransform:"uppercase",letterSpacing:"0.12em",padding:"4px 8px"}}><i className="fa-solid fa-palette" style={{marginRight:5,color:c.p}}/>Colorful</div>
                 {colorTemplates.map(t=>(
                   <button key={t} className="dd-row" onClick={()=>{setTemplate(t);setTmplOpen(false);}} style={{width:"100%",display:"flex",alignItems:"center",gap:9,padding:"8px 9px",background:template===t?c.l:"transparent",border:"none",borderRadius:8,cursor:"pointer",textAlign:"left",fontFamily:"'Plus Jakarta Sans',sans-serif"}}>
                     <i className={TEMPLATE_META[t].icon} style={{fontSize:11,color:template===t?c.p:"#9ca3af",width:14}}/>
@@ -1124,13 +832,14 @@ export function ResumeFullPreview({data,template:initT="chronological",color:ini
                       </div>
                       <div style={{fontSize:9.5,color:"#9ca3af"}}>{TEMPLATE_META[t].desc}</div>
                     </div>
-                    <span className="toolbar-ats-badge" style={{fontSize:9,fontWeight:700,color:"#f59e0b",background:"#fffbeb",padding:"1px 5px",borderRadius:4,whiteSpace:"nowrap"}}>{TEMPLATE_META[t].ats}%</span>
+                    <span style={{fontSize:9,fontWeight:700,color:"#f59e0b",background:"#fffbeb",padding:"1px 5px",borderRadius:4,whiteSpace:"nowrap"}}>{TEMPLATE_META[t].ats}%</span>
                     {template===t&&<i className="fa-solid fa-check" style={{fontSize:9,color:c.p}}/>}
                   </button>
                 ))}
               </div>
             )}
           </div>
+          {/* Color dropdown */}
           <div style={{position:"relative"}}>
             <button onClick={()=>{setClrOpen(o=>!o);setTmplOpen(false);}} style={{display:"flex",alignItems:"center",gap:5,background:clrOpen?"#f9fafb":"transparent",border:"1px solid #e5e7eb",borderRadius:9,padding:"6px 10px",fontSize:12,fontWeight:600,color:"#374151",cursor:"pointer",fontFamily:"'Plus Jakarta Sans',sans-serif",whiteSpace:"nowrap"}}>
               <span style={{width:12,height:12,borderRadius:"50%",background:c.p,display:"inline-block",flexShrink:0}}/>
@@ -1139,7 +848,7 @@ export function ResumeFullPreview({data,template:initT="chronological",color:ini
             </button>
             {clrOpen&&(
               <div className="clr-panel">
-                <div style={{fontSize:9.5,fontWeight:800,color:"#9ca3af",textTransform:"uppercase",letterSpacing:"0.12em",padding:"4px 8px 6px"}}>Accent Color</div>
+                <div style={{fontSize:9.5,fontWeight:800,color:"#9ca3af",textTransform:"uppercase",letterSpacing:"0.12em",padding:"4px 8px 6px"}}>Color</div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:3}}>
                   {(Object.keys(COLOR_META) as ColorName[]).map(col=>(
                     <button key={col} className="dd-row" onClick={()=>{setColor(col);setClrOpen(false);}} style={{display:"flex",alignItems:"center",gap:7,padding:"7px 8px",background:color===col?"#f9fafb":"transparent",border:color===col?`1.5px solid ${HC[col].b}`:"1.5px solid transparent",borderRadius:8,cursor:"pointer",fontFamily:"'Plus Jakarta Sans',sans-serif"}}>
@@ -1153,6 +862,7 @@ export function ResumeFullPreview({data,template:initT="chronological",color:ini
           </div>
         </div>
 
+        {/* CENTER */}
         <div className="center-info" style={{position:"absolute",left:"50%",transform:"translateX(-50%)",textAlign:"center",flexDirection:"column",alignItems:"center",pointerEvents:"none"}}>
           <div style={{fontSize:12.5,fontWeight:700,color:"#111827",whiteSpace:"nowrap"}}>{data.contact.firstName||"Resume"} {data.contact.lastName||""} — CV</div>
           <div style={{fontSize:9.5,color:"#9ca3af",marginTop:1,whiteSpace:"nowrap"}}>
@@ -1163,9 +873,10 @@ export function ResumeFullPreview({data,template:initT="chronological",color:ini
           </div>
         </div>
 
+        {/* RIGHT — mobile-safe download */}
         <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
-          <span style={{fontSize:10,color:"#9ca3af",whiteSpace:"nowrap"}} className="toolbar-label"><i className="fa-regular fa-file-pdf" style={{marginRight:4}}/> A4</span>
-          <DownloadBtn data={data} template={template} color={color}/>
+          <DownloadBtn primaryColor={c.p} fileName={fileName}/>
+          <SaveResume resumeData={data} template={template} color={color} />
         </div>
       </div>
 

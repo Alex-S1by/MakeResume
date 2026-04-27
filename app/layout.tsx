@@ -1,5 +1,6 @@
 import "./globals.css";
 import { Toaster } from "react-hot-toast";
+import Providers from "./providers";
 
 export const metadata = {
   metadataBase: new URL("https://makeresume-in.vercel.app"), 
@@ -37,11 +38,13 @@ export const metadata = {
   },
 };
 
+
+
 export default function RootLayout({
   children,
-}: Readonly<{
+}: {
   children: React.ReactNode;
-}>) {
+}) {
   return (
     <html
       lang="en">
@@ -49,8 +52,10 @@ export default function RootLayout({
 
        
     <body>
+      <Providers>
       <Toaster position="top-right" />
-      {children}
+       {children}
+       </Providers>
       </body>
     </html>
   );
